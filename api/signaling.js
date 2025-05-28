@@ -80,8 +80,8 @@ function normalizeRequest(data) {
   const map = {
     'offer': 'exchange-offer',
     'answer': 'exchange-answer',
-    'ice-candidate': 'exchange-ice',
-    'register': 'find-match',   // important
+    'ice-candidate': 'exchange-ice',   
+    'register': 'find-match',
     'roomId': 'matchId'
   };
   const normalized = { ...data };
