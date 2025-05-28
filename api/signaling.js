@@ -30,18 +30,21 @@ export default async function handler(req, res) {
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  let data = req.body;
-  if (req.method === 'GET') {
-    data = Object.fromEntries(new URL(req.url, `http://${req.headers.host}`).searchParams.entries());
-    if (!data.type) return handleGetRequest(req, res);
-  }
+	let data = req.body;
+	if (req.method === 'GET') {
+	  data = Object.fromEntries(new URL(req.url, `http://${req.headers.host}`).searchParams.entries());
+	}
 
-  if (!data || !data.type) {
-    return res.status(400).json({ status: 'error', message: 'Invalid request data' });
-  }
+	if (!data) {
+	  return res.status(400).json({ status: 'error', message: 'Invalid request data' });
+	}
 
-  const now = Date.now();
-  const normalized = normalizeRequest(data);
+	const normalized = normalizeRequest(data);
+
+	if (!normalized.type) {
+	  return handleGetRequest(req, res);
+	}
+
 
   let result;
   switch (normalized.type) {
@@ -62,7 +65,7 @@ function normalizeRequest(data) {
     'offer': 'exchange-offer',
     'answer': 'exchange-answer',
     'ice-candidate': 'exchange-ice',
-    'register': 'find-match',
+    'register': 'find-match',   // important
     'roomId': 'matchId'
   };
   const normalized = { ...data };
