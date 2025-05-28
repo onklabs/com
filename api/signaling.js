@@ -1,36 +1,35 @@
-// api/signaling.js - Vercel serverless function for WebRTC signaling
+// api/signaling.js - Minimal signaling server for matching only
 
-// In-memory storage for active connections (will reset on cold starts)
-let activeConnections = new Map();
+// In-memory storage
 let waitingQueue = [];
+let matches = new Map(); // Store temporary match info
 let heartbeats = new Map();
 
-// Cleanup expired entries every 30 seconds
+// Cleanup every 30 seconds
 setInterval(() => {
   const now = Date.now();
   
-  // Clean expired heartbeats (5 minutes)
+  // Clean expired heartbeats (2 minutes)
   for (const [peerId, lastSeen] of heartbeats.entries()) {
-    if (now - lastSeen > 300000) {
+    if (now - lastSeen > 120000) {
       heartbeats.delete(peerId);
-      activeConnections.delete(peerId);
       waitingQueue = waitingQueue.filter(p => p.peerId !== peerId);
     }
   }
   
-  // Clean old waiting queue entries (2 minutes)
-  waitingQueue = waitingQueue.filter(p => now - p.timestamp < 120000);
+  // Clean old waiting queue entries (1 minute)
+  waitingQueue = waitingQueue.filter(p => now - p.timestamp < 60000);
   
-  // Clean up matched connections that are no longer needed (after 10 minutes)
-  for (const [peerId, connection] of activeConnections.entries()) {
-    if (connection.status === 'matched' && now - connection.timestamp > 600000) {
-      activeConnections.delete(peerId);
+  // Clean old matches (5 minutes - give time for direct connection)
+  for (const [matchId, match] of matches.entries()) {
+    if (now - match.timestamp > 300000) {
+      matches.delete(matchId);
     }
   }
 }, 30000);
 
 export default async function handler(req, res) {
-  // Set CORS headers
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -63,32 +62,28 @@ export default async function handler(req, res) {
 
     let result;
     switch (data.type) {
-      case 'register':
-        result = handleRegistration(data, now);
+      case 'find-match':
+        result = handleFindMatch(data, now);
         break;
       
-      case 'offer':
-        result = handleOffer(data, now);
+      case 'exchange-offer':
+        result = handleExchangeOffer(data, now);
         break;
       
-      case 'answer':
-        result = handleAnswer(data, now);
+      case 'exchange-answer':
+        result = handleExchangeAnswer(data, now);
         break;
         
-      case 'ice-candidate':
-        result = handleIceCandidate(data, now);
-        break;
-      
-      case 'poll':
-        result = handlePoll(data);
-        break;
-      
-      case 'disconnect':
-        result = handleDisconnection(data, now);
+      case 'exchange-ice':
+        result = handleExchangeIce(data, now);
         break;
       
       case 'heartbeat':
         result = handleHeartbeat(data, now);
+        break;
+      
+      case 'cancel-search':
+        result = handleCancelSearch(data);
         break;
       
       default:
@@ -101,38 +96,21 @@ export default async function handler(req, res) {
     console.error('Server error:', error);
     return res.status(500).json({
       status: 'error',
-      message: 'Server error: ' + error.message,
-      timestamp: Date.now()
+      message: 'Server error'
     });
   }
 }
 
 function handleGetRequest(req, res) {
-  const { query } = req;
   const now = Date.now();
   
-  // Check if this is a registration request via GET
-  if (query.type === 'register' && query.peerId) {
-    const registrationData = {
-      type: 'register',
-      peerId: query.peerId,
-      timezone: query.timezone || '0',
-      userAgent: req.headers['user-agent'] || 'unknown'
-    };
-    
-    const result = handleRegistration(registrationData, now);
-    return res.status(result.status === 'error' ? 400 : 200).json(result);
-  }
-  
-  // Default GET response - server stats
   const stats = {
-    service: 'WebRTC Signaling Server',
+    service: 'WebRTC Matching Server',
     status: 'online',
     timestamp: now,
     stats: {
       waiting: waitingQueue.length,
-      active_connections: activeConnections.size,
-      active_heartbeats: heartbeats.size,
+      active_matches: matches.size,
       server_time: new Date().toISOString()
     }
   };
@@ -140,7 +118,7 @@ function handleGetRequest(req, res) {
   return res.status(200).json(stats);
 }
 
-function handleRegistration(data, now) {
+function handleFindMatch(data, now) {
   if (!data.peerId) {
     return { status: 'error', message: 'Missing peerId' };
   }
@@ -152,43 +130,40 @@ function handleRegistration(data, now) {
     // Remove from waiting queue if already exists
     waitingQueue = waitingQueue.filter(p => p.peerId !== data.peerId);
     
-    // Look for available peer in queue
+    // Look for available peer
     const availablePeer = waitingQueue.find(p => 
       p.peerId !== data.peerId && 
-      now - p.timestamp < 60000 &&
-      !activeConnections.has(p.peerId)
+      now - p.timestamp < 30000 // Only recent entries
     );
     
     if (availablePeer) {
-      // Create match - minimal storage after match
-      const roomId = `room_${data.peerId}_${availablePeer.peerId}`;
+      // Create match
+      const matchId = `match_${Math.random().toString(36).substr(2, 12)}`;
       
-      // Store minimal connection info - just for tracking purposes
-      activeConnections.set(data.peerId, {
-        partnerId: availablePeer.peerId,
-        roomId: roomId,
+      // Create match record
+      const matchInfo = {
+        id: matchId,
+        peer1: data.peerId,
+        peer2: availablePeer.peerId,
         timestamp: now,
-        status: 'matched_direct', // Indicates they communicate directly
-        lastSeen: now
-      });
+        status: 'matched',
+        signaling: {
+          [data.peerId]: { offers: [], answers: [], ice: [] },
+          [availablePeer.peerId]: { offers: [], answers: [], ice: [] }
+        }
+      };
       
-      activeConnections.set(availablePeer.peerId, {
-        partnerId: data.peerId,
-        roomId: roomId,
-        timestamp: now,
-        status: 'matched_direct',
-        lastSeen: now
-      });
+      matches.set(matchId, matchInfo);
       
       // Remove matched peer from queue
       waitingQueue = waitingQueue.filter(p => p.peerId !== availablePeer.peerId);
       
-      console.log('Match created:', data.peerId, '<->', availablePeer.peerId, 'Room:', roomId);
+      console.log('Match created:', matchId, data.peerId, '<->', availablePeer.peerId);
       
       return { 
         status: 'matched', 
-        roomId: roomId,
-        peerId: availablePeer.peerId, // For backward compatibility
+        matchId: matchId,
+        partnerId: availablePeer.peerId,
         isInitiator: true,
         timestamp: now
       };
@@ -197,9 +172,7 @@ function handleRegistration(data, now) {
     // Add to waiting queue
     waitingQueue.push({ 
       peerId: data.peerId, 
-      timestamp: now,
-      timezone: data.timezone || '0',
-      userAgent: data.userAgent || 'unknown'
+      timestamp: now
     });
     
     return { 
@@ -209,207 +182,122 @@ function handleRegistration(data, now) {
     };
     
   } catch (error) {
-    console.error('Registration error:', error);
-    return { status: 'error', message: 'Registration failed: ' + error.message };
+    console.error('Find match error:', error);
+    return { status: 'error', message: 'Find match failed' };
   }
 }
 
-function handleOffer(data, now) {
-  // Since clients communicate directly after match, 
-  // we only handle offers if they're still using server relay
-  if (!data.peerId || !data.offer) {
-    return { status: 'error', message: 'Missing peerId or offer' };
+function handleExchangeOffer(data, now) {
+  if (!data.matchId || !data.peerId || !data.offer) {
+    return { status: 'error', message: 'Missing required fields' };
   }
   
   try {
-    const connection = activeConnections.get(data.peerId);
-    if (!connection || !connection.partnerId) {
-      return { status: 'error', message: 'No active match found - clients should communicate directly' };
+    const match = matches.get(data.matchId);
+    if (!match) {
+      return { status: 'error', message: 'Match not found' };
     }
     
-    // For backward compatibility - but recommend direct communication
-    const partnerConnection = activeConnections.get(connection.partnerId);
-    if (!partnerConnection) {
-      return { status: 'error', message: 'Partner connection not found' };
+    // Verify peer is part of this match
+    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
+      return { status: 'error', message: 'Unauthorized' };
     }
     
-    // Store offer but clients should switch to direct communication
-    partnerConnection.pendingSignals = partnerConnection.pendingSignals || [];
-    partnerConnection.pendingSignals.push({
-      type: 'offer',
-      data: data.offer,
+    // Store offer for the other peer to retrieve
+    const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
+    match.signaling[partnerId].offers.push({
+      from: data.peerId,
+      offer: data.offer,
       timestamp: now
     });
     
+    matches.set(data.matchId, match);
+    
     return { 
-      status: 'offer_sent',
-      partnerId: connection.partnerId,
-      note: 'Consider switching to direct WebRTC communication',
+      status: 'offer_stored',
+      partnerId: partnerId,
       timestamp: now
     };
     
   } catch (error) {
-    console.error('Offer handling error:', error);
-    return { status: 'error', message: 'Offer handling failed: ' + error.message };
+    console.error('Exchange offer error:', error);
+    return { status: 'error', message: 'Exchange offer failed' };
   }
 }
 
-function handleAnswer(data, now) {
-  if (!data.peerId || !data.answer) {
-    return { status: 'error', message: 'Missing peerId or answer' };
+function handleExchangeAnswer(data, now) {
+  if (!data.matchId || !data.peerId || !data.answer) {
+    return { status: 'error', message: 'Missing required fields' };
   }
   
   try {
-    const connection = activeConnections.get(data.peerId);
-    if (!connection || !connection.partnerId) {
-      return { status: 'error', message: 'No active match found - clients should communicate directly' };
+    const match = matches.get(data.matchId);
+    if (!match) {
+      return { status: 'error', message: 'Match not found' };
     }
     
-    const partnerConnection = activeConnections.get(connection.partnerId);
-    if (!partnerConnection) {
-      return { status: 'error', message: 'Partner connection not found' };
+    // Verify peer is part of this match
+    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
+      return { status: 'error', message: 'Unauthorized' };
     }
     
-    // Store answer but clients should switch to direct communication
-    partnerConnection.pendingSignals = partnerConnection.pendingSignals || [];
-    partnerConnection.pendingSignals.push({
-      type: 'answer',
-      data: data.answer,
+    // Store answer for the other peer to retrieve
+    const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
+    match.signaling[partnerId].answers.push({
+      from: data.peerId,
+      answer: data.answer,
       timestamp: now
     });
     
+    matches.set(data.matchId, match);
+    
     return { 
-      status: 'answer_sent',
-      partnerId: connection.partnerId,
-      note: 'Consider switching to direct WebRTC communication',
+      status: 'answer_stored',
+      partnerId: partnerId,
       timestamp: now
     };
     
   } catch (error) {
-    console.error('Answer handling error:', error);
-    return { status: 'error', message: 'Answer handling failed: ' + error.message };
+    console.error('Exchange answer error:', error);
+    return { status: 'error', message: 'Exchange answer failed' };
   }
 }
 
-function handleIceCandidate(data, now) {
-  if (!data.peerId || !data.candidate) {
-    return { status: 'error', message: 'Missing peerId or candidate' };
+function handleExchangeIce(data, now) {
+  if (!data.matchId || !data.peerId || !data.candidate) {
+    return { status: 'error', message: 'Missing required fields' };
   }
   
   try {
-    const connection = activeConnections.get(data.peerId);
-    if (!connection || !connection.partnerId) {
-      return { status: 'error', message: 'No active match found - clients should communicate directly' };
+    const match = matches.get(data.matchId);
+    if (!match) {
+      return { status: 'error', message: 'Match not found' };
     }
     
-    const partnerConnection = activeConnections.get(connection.partnerId);
-    if (!partnerConnection) {
-      return { status: 'error', message: 'Partner connection not found' };
+    // Verify peer is part of this match
+    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
+      return { status: 'error', message: 'Unauthorized' };
     }
     
-    // Store ICE candidate but clients should switch to direct communication
-    partnerConnection.pendingSignals = partnerConnection.pendingSignals || [];
-    partnerConnection.pendingSignals.push({
-      type: 'ice-candidate',
-      data: data.candidate,
+    // Store ICE candidate for the other peer to retrieve
+    const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
+    match.signaling[partnerId].ice.push({
+      from: data.peerId,
+      candidate: data.candidate,
       timestamp: now
     });
     
+    matches.set(data.matchId, match);
+    
     return { 
-      status: 'candidate_sent',
-      partnerId: connection.partnerId,
-      note: 'Consider switching to direct WebRTC communication',
+      status: 'ice_stored',
+      partnerId: partnerId,
       timestamp: now
     };
     
   } catch (error) {
-    console.error('ICE candidate handling error:', error);
-    return { status: 'error', message: 'ICE candidate handling failed: ' + error.message };
-  }
-}
-
-function handlePoll(data) {
-  if (!data.peerId) {
-    return { status: 'error', message: 'Missing peerId' };
-  }
-  
-  try {
-    const connection = activeConnections.get(data.peerId);
-    if (!connection) {
-      return { 
-        status: 'no_connection',
-        signals: []
-      };
-    }
-    
-    // Get pending signals and clear them
-    const signals = connection.pendingSignals || [];
-    connection.pendingSignals = [];
-    
-    // Update connection in map
-    activeConnections.set(data.peerId, connection);
-    
-    return { 
-      status: 'polled', 
-      signals: signals,
-      partnerId: connection.partnerId,
-      count: signals.length,
-      connectionStatus: connection.status
-    };
-    
-  } catch (error) {
-    console.error('Polling error:', error);
-    return { status: 'error', message: 'Polling failed: ' + error.message };
-  }
-}
-
-function handleDisconnection(data, now) {
-  if (!data.peerId) {
-    return { status: 'error', message: 'Missing peerId' };
-  }
-  
-  try {
-    const connection = activeConnections.get(data.peerId);
-    
-    if (connection && connection.partnerId) {
-      console.log('Disconnection handled:', data.peerId, 'from', connection.partnerId);
-      
-      // For matched_direct connections, just clean up our records
-      // The WebRTC connection handles itself
-      if (connection.status === 'matched_direct') {
-        activeConnections.delete(data.peerId);
-        activeConnections.delete(connection.partnerId);
-      } else {
-        // For other connections, notify partner
-        const partnerConnection = activeConnections.get(connection.partnerId);
-        if (partnerConnection) {
-          partnerConnection.pendingSignals = partnerConnection.pendingSignals || [];
-          partnerConnection.pendingSignals.push({
-            type: 'disconnect',
-            data: { reason: 'partner_disconnected' },
-            timestamp: now
-          });
-        }
-        
-        activeConnections.delete(data.peerId);
-        activeConnections.delete(connection.partnerId);
-      }
-    }
-    
-    // Remove from waiting queue
-    waitingQueue = waitingQueue.filter(p => p.peerId !== data.peerId);
-    
-    // Remove heartbeat
-    heartbeats.delete(data.peerId);
-    
-    return { 
-      status: 'disconnected',
-      timestamp: now
-    };
-    
-  } catch (error) {
-    console.error('Disconnection error:', error);
-    return { status: 'error', message: 'Disconnection failed: ' + error.message };
+    console.error('Exchange ICE error:', error);
+    return { status: 'error', message: 'Exchange ICE failed' };
   }
 }
 
@@ -421,26 +309,69 @@ function handleHeartbeat(data, now) {
   try {
     heartbeats.set(data.peerId, now);
     
-    const connection = activeConnections.get(data.peerId);
-    if (connection) {
-      connection.lastSeen = now;
-      activeConnections.set(data.peerId, connection);
-      
-      return { 
-        status: 'alive',
-        matched: true,
-        partnerId: connection.partnerId,
-        connectionStatus: connection.status
-      };
+    // Check if user has a match and get pending signals
+    let matchInfo = null;
+    let pendingSignals = null;
+    
+    for (const [matchId, match] of matches.entries()) {
+      if (match.peer1 === data.peerId || match.peer2 === data.peerId) {
+        matchInfo = {
+          matchId: matchId,
+          partnerId: match.peer1 === data.peerId ? match.peer2 : match.peer1,
+          isInitiator: match.peer1 === data.peerId
+        };
+        
+        // Get and clear pending signals
+        const signals = match.signaling[data.peerId];
+        pendingSignals = {
+          offers: [...signals.offers],
+          answers: [...signals.answers],
+          ice: [...signals.ice]
+        };
+        
+        // Clear retrieved signals
+        signals.offers = [];
+        signals.answers = [];
+        signals.ice = [];
+        
+        matches.set(matchId, match);
+        break;
+      }
     }
     
     return { 
       status: 'alive',
-      matched: false
+      matched: !!matchInfo,
+      match: matchInfo,
+      signals: pendingSignals,
+      timestamp: now
     };
     
   } catch (error) {
     console.error('Heartbeat error:', error);
-    return { status: 'error', message: 'Heartbeat failed: ' + error.message };
+    return { status: 'error', message: 'Heartbeat failed' };
+  }
+}
+
+function handleCancelSearch(data) {
+  if (!data.peerId) {
+    return { status: 'error', message: 'Missing peerId' };
+  }
+  
+  try {
+    // Remove from waiting queue
+    waitingQueue = waitingQueue.filter(p => p.peerId !== data.peerId);
+    
+    // Remove heartbeat
+    heartbeats.delete(data.peerId);
+    
+    return { 
+      status: 'cancelled',
+      timestamp: Date.now()
+    };
+    
+  } catch (error) {
+    console.error('Cancel search error:', error);
+    return { status: 'error', message: 'Cancel search failed' };
   }
 }
