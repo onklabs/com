@@ -82,11 +82,11 @@ function normalizeRequest(data) {
     'answer': 'exchange-answer',
     'ice-candidate': 'exchange-ice',   
     'register': 'find-match',
-    'roomId': 'matchId'
+    'matchId': 'matchId'
   };
   const normalized = { ...data };
   if (map[data.type]) normalized.type = map[data.type];
-  if (data.roomId && !data.matchId) normalized.matchId = data.roomId;
+  if (data.matchId && !data.matchId) normalized.matchId = data.matchId;
   return normalized;
 }
 
