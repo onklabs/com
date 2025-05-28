@@ -30,35 +30,50 @@ export default async function handler(req, res) {
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-	let data = req.body;
-	if (req.method === 'GET') {
-	  data = Object.fromEntries(new URL(req.url, `http://${req.headers.host}`).searchParams.entries());
-	}
+  let data = {};
 
-	if (!data) {
-	  return res.status(400).json({ status: 'error', message: 'Invalid request data' });
-	}
+  try {
+    if (req.method === 'GET') {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      data = Object.fromEntries(url.searchParams.entries());
+    } else if (req.method === 'POST') {
+      data = req.body;
+    }
+  } catch (e) {
+    return res.status(400).json({ status: 'error', message: 'Failed to parse request' });
+  }
 
-	const normalized = normalizeRequest(data);
+  if (!data || typeof data !== 'object') {
+    return res.status(400).json({ status: 'error', message: 'Invalid request data' });
+  }
 
-	if (!normalized.type) {
-	  return handleGetRequest(req, res);
-	}
+  const normalized = normalizeRequest(data);
 
+  if (!normalized.type) {
+    return handleGetRequest(req, res);
+  }
 
+  const now = Date.now();
   let result;
-  switch (normalized.type) {
-    case 'find-match': result = handleFindMatch(normalized, now); break;
-    case 'exchange-offer': result = handleExchangeOffer(normalized, now); break;
-    case 'exchange-answer': result = handleExchangeAnswer(normalized, now); break;
-    case 'exchange-ice': result = handleExchangeIce(normalized, now); break;
-    case 'heartbeat': result = handleHeartbeat(normalized, now); break;
-    case 'cancel-search': result = handleCancelSearch(normalized); break;
-    default: result = { status: 'error', message: 'Unknown request type' };
+
+  try {
+    switch (normalized.type) {
+      case 'find-match': result = handleFindMatch(normalized, now); break;
+      case 'exchange-offer': result = handleExchangeOffer(normalized, now); break;
+      case 'exchange-answer': result = handleExchangeAnswer(normalized, now); break;
+      case 'exchange-ice': result = handleExchangeIce(normalized, now); break;
+      case 'heartbeat': result = handleHeartbeat(normalized, now); break;
+      case 'cancel-search': result = handleCancelSearch(normalized); break;
+      default: result = { status: 'error', message: 'Unknown request type' };
+    }
+  } catch (e) {
+    console.error('Server Error:', e);
+    return res.status(500).json({ status: 'error', message: 'Server crashed', error: String(e) });
   }
 
   return res.status(result.status === 'error' ? 400 : 200).json(result);
 }
+
 
 function normalizeRequest(data) {
   const map = {
