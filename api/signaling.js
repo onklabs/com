@@ -1,26 +1,16 @@
-// api/signaling.js - Minimal signaling server for matching only
-
-// In-memory storage
 let waitingQueue = [];
-let matches = new Map(); // Store temporary match info
+let matches = new Map();
 let heartbeats = new Map();
 
-// Cleanup every 30 seconds
 setInterval(() => {
   const now = Date.now();
-  
-  // Clean expired heartbeats (2 minutes)
   for (const [peerId, lastSeen] of heartbeats.entries()) {
     if (now - lastSeen > 120000) {
       heartbeats.delete(peerId);
       waitingQueue = waitingQueue.filter(p => p.peerId !== peerId);
     }
   }
-  
-  // Clean old waiting queue entries (1 minute)
   waitingQueue = waitingQueue.filter(p => now - p.timestamp < 60000);
-  
-  // Clean old matches (5 minutes - give time for direct connection)
   for (const [matchId, match] of matches.entries()) {
     if (now - match.timestamp > 300000) {
       matches.delete(matchId);
@@ -29,82 +19,55 @@ setInterval(() => {
 }, 30000);
 
 export default async function handler(req, res) {
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  if (req.method === 'GET') {
-    return handleGetRequest(req, res);
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ 
-      status: 'error', 
-      message: 'Method not allowed' 
-    });
-  }
-  
-  try {
-    const data = req.body;
-    const now = Date.now();
-    
-    if (!data || !data.type) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Invalid request data'
-      });
-    }
 
-    let result;
-    switch (data.type) {
-      case 'find-match':
-        result = handleFindMatch(data, now);
-        break;
-      
-      case 'exchange-offer':
-        result = handleExchangeOffer(data, now);
-        break;
-      
-      case 'exchange-answer':
-        result = handleExchangeAnswer(data, now);
-        break;
-        
-      case 'exchange-ice':
-        result = handleExchangeIce(data, now);
-        break;
-      
-      case 'heartbeat':
-        result = handleHeartbeat(data, now);
-        break;
-      
-      case 'cancel-search':
-        result = handleCancelSearch(data);
-        break;
-      
-      default:
-        result = { status: 'error', message: 'Unknown request type' };
-    }
-    
-    return res.status(result.status === 'error' ? 400 : 200).json(result);
-    
-  } catch (error) {
-    console.error('Server error:', error);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Server error'
-    });
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  let data = req.body;
+  if (req.method === 'GET') {
+    data = Object.fromEntries(new URL(req.url, `http://${req.headers.host}`).searchParams.entries());
+    if (!data.type) return handleGetRequest(req, res);
   }
+
+  if (!data || !data.type) {
+    return res.status(400).json({ status: 'error', message: 'Invalid request data' });
+  }
+
+  const now = Date.now();
+  const normalized = normalizeRequest(data);
+
+  let result;
+  switch (normalized.type) {
+    case 'find-match': result = handleFindMatch(normalized, now); break;
+    case 'exchange-offer': result = handleExchangeOffer(normalized, now); break;
+    case 'exchange-answer': result = handleExchangeAnswer(normalized, now); break;
+    case 'exchange-ice': result = handleExchangeIce(normalized, now); break;
+    case 'heartbeat': result = handleHeartbeat(normalized, now); break;
+    case 'cancel-search': result = handleCancelSearch(normalized); break;
+    default: result = { status: 'error', message: 'Unknown request type' };
+  }
+
+  return res.status(result.status === 'error' ? 400 : 200).json(result);
+}
+
+function normalizeRequest(data) {
+  const map = {
+    'offer': 'exchange-offer',
+    'answer': 'exchange-answer',
+    'ice-candidate': 'exchange-ice',
+    'roomId': 'matchId'
+  };
+  const normalized = { ...data };
+  if (map[data.type]) normalized.type = map[data.type];
+  if (data.roomId && !data.matchId) normalized.matchId = data.roomId;
+  return normalized;
 }
 
 function handleGetRequest(req, res) {
   const now = Date.now();
-  
-  const stats = {
+  return res.status(200).json({
     service: 'WebRTC Matching Server',
     status: 'online',
     timestamp: now,
@@ -113,10 +76,9 @@ function handleGetRequest(req, res) {
       active_matches: matches.size,
       server_time: new Date().toISOString()
     }
-  };
-  
-  return res.status(200).json(stats);
+  });
 }
+
 
 function handleFindMatch(data, now) {
   if (!data.peerId) {
