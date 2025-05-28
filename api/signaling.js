@@ -64,6 +64,7 @@ export default async function handler(req, res) {
       case 'exchange-ice': result = handleExchangeIce(normalized, now); break;
       case 'heartbeat': result = handleHeartbeat(normalized, now); break;
       case 'cancel-search': result = handleCancelSearch(normalized); break;
+	  case 'send-key': result = handleSendKey(normalized, now); break;
       default: result = { status: 'error', message: 'Unknown request type' };
     }
   } catch (e) {
