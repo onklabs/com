@@ -109,16 +109,18 @@ function handleFindMatch(data, now) {
     return { status: 'error', message: 'Missing peerId' };
   }
 
- 
-  // Trường hợp peer này đã được matched bởi client khác
+  // ✅ KIỂM TRA pendingMatched TRƯỚC
   if (pendingMatched.has(data.peerId)) {
     const info = pendingMatched.get(data.peerId);
     pendingMatched.delete(data.peerId);
+    
+    console.log(`[PENDING] Client ${data.peerId} nhận match từ pending:`, info.matchId);
+    
     return {
       status: 'matched',
       matchId: info.matchId,
       partnerId: info.partnerId,
-      isInitiator: false,
+      isInitiator: false, // Client thứ 2 luôn là non-initiator
       timestamp: now
     };
   }
@@ -136,8 +138,8 @@ function handleFindMatch(data, now) {
 
       const matchInfo = {
         id: matchId,
-        peer1: data.peerId,
-        peer2: availablePeer.peerId,
+        peer1: data.peerId,        // Client thứ 1 (initiator)
+        peer2: availablePeer.peerId, // Client thứ 2 (non-initiator)
         timestamp: now,
         status: 'matched',
         signaling: {
@@ -149,20 +151,20 @@ function handleFindMatch(data, now) {
       matches.set(matchId, matchInfo);
       waitingQueue = waitingQueue.filter(p => p.peerId !== availablePeer.peerId);
 
-      // NEW: lưu lại trạng thái matched cho client chưa được phản hồi
+      // ✅ LƯU pendingMatched cho client thứ 2
       pendingMatched.set(availablePeer.peerId, {
         matchId,
         partnerId: data.peerId,
         timestamp: now
       });
 
-      console.log('Match created:', matchId, data.peerId, '<->', availablePeer.peerId);
+      console.log('Match created:', matchId, data.peerId, '(initiator) <->', availablePeer.peerId, '(non-initiator)');
 
       return {
         status: 'matched',
         matchId,
         partnerId: availablePeer.peerId,
-        isInitiator: true,
+        isInitiator: true, // Client thứ 1 là initiator
         timestamp: now
       };
     }
@@ -261,27 +263,62 @@ function handleHeartbeat(data, now) {
     let matchInfo = null;
     let pendingSignals = null;
 
-    for (const [matchId, match] of matches.entries()) {
-      if (match.peer1 === data.peerId || match.peer2 === data.peerId) {
-        matchInfo = {
-          matchId: matchId,
-          partnerId: match.peer1 === data.peerId ? match.peer2 : match.peer1,
-          isInitiator: match.peer1 === data.peerId
-        };
-
+    // ✅ KIỂM TRA pendingMatched TRONG HEARTBEAT
+    if (pendingMatched.has(data.peerId)) {
+      const info = pendingMatched.get(data.peerId);
+      pendingMatched.delete(data.peerId);
+      
+      matchInfo = {
+        matchId: info.matchId,
+        partnerId: info.partnerId,
+        isInitiator: false // Từ pendingMatched luôn là non-initiator
+      };
+      
+      console.log(`[HEARTBEAT] Client ${data.peerId} nhận match từ pending:`, info.matchId);
+      
+      // Lấy signals từ match đã tạo
+      const match = matches.get(info.matchId);
+      if (match && match.signaling[data.peerId]) {
         const signals = match.signaling[data.peerId];
         pendingSignals = {
           offers: [...signals.offers],
           answers: [...signals.answers],
           ice: [...signals.ice]
         };
-
+        
+        // Clear signals sau khi gửi
         signals.offers = [];
         signals.answers = [];
         signals.ice = [];
+        
+        matches.set(info.matchId, match);
+      }
+    }
+    
+    // ✅ KIỂM TRA match hiện tại
+    if (!matchInfo) {
+      for (const [matchId, match] of matches.entries()) {
+        if (match.peer1 === data.peerId || match.peer2 === data.peerId) {
+          matchInfo = {
+            matchId: matchId,
+            partnerId: match.peer1 === data.peerId ? match.peer2 : match.peer1,
+            isInitiator: match.peer1 === data.peerId
+          };
 
-        matches.set(matchId, match);
-        break;
+          const signals = match.signaling[data.peerId];
+          pendingSignals = {
+            offers: [...signals.offers],
+            answers: [...signals.answers],
+            ice: [...signals.ice]
+          };
+
+          signals.offers = [];
+          signals.answers = [];
+          signals.ice = [];
+
+          matches.set(matchId, match);
+          break;
+        }
       }
     }
 
@@ -298,7 +335,6 @@ function handleHeartbeat(data, now) {
     return { status: 'error', message: 'Heartbeat failed' };
   }
 }
-
 function handleCancelSearch(data) {
   if (!data.peerId) {
     return { status: 'error', message: 'Missing peerId' };
