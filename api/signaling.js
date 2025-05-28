@@ -109,19 +109,6 @@ function handleFindMatch(data, now) {
     return { status: 'error', message: 'Missing peerId' };
   }
 
-	// Không cho peer đã có match được tìm tiếp
-	for (const [matchId, match] of matches.entries()) {
-	  if (match.peer1 === data.peerId || match.peer2 === data.peerId) {
-		return {
-		  status: 'matched',
-		  matchId,
-		  partnerId: match.peer1 === data.peerId ? match.peer2 : match.peer1,
-		  isInitiator: match.peer1 === data.peerId,
-		  timestamp: now
-		};
-	  }
-	}
-
   // Trường hợp peer này đã được matched bởi client khác
   if (pendingMatched.has(data.peerId)) {
     const info = pendingMatched.get(data.peerId);
