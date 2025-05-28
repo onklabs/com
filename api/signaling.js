@@ -246,7 +246,7 @@ function handleExchangeIce(data, now) {
 
   try {
     const match = matches.get(data.matchId);
-    if (!match || !match.signaling[data.peerId]) {
+    if (!match ) {
       return { status: 'error', message: 'Match not found' };
     }
 
