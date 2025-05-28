@@ -57,6 +57,7 @@ function normalizeRequest(data) {
     'offer': 'exchange-offer',
     'answer': 'exchange-answer',
     'ice-candidate': 'exchange-ice',
+    'register': 'find-match',
     'roomId': 'matchId'
   };
   const normalized = { ...data };
