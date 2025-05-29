@@ -1,4 +1,4 @@
-// api/signaling.js - Minimal signaling server for matching only
+// api/signaling.js - Fixed signaling server with match validation
 
 // In-memory storage
 let waitingQueue = [];
@@ -20,10 +20,22 @@ setInterval(() => {
   // Clean old waiting queue entries (1 minute)
   waitingQueue = waitingQueue.filter(p => now - p.timestamp < 60000);
   
-  // Clean old matches (5 minutes - give time for direct connection)
+  // Clean old matches (10 minutes - increased from 5 minutes)
   for (const [matchId, match] of matches.entries()) {
-    if (now - match.timestamp > 300000) {
+    if (now - match.timestamp > 600000) {
       matches.delete(matchId);
+    }
+  }
+  
+  // Clean old signals within matches (only signals older than 30 seconds)
+  for (const [matchId, match] of matches.entries()) {
+    for (const peerId in match.signaling) {
+      const signals = match.signaling[peerId];
+      
+      // Clean old offers/answers/ice
+      signals.offers = signals.offers.filter(s => now - s.timestamp < 30000);
+      signals.answers = signals.answers.filter(s => now - s.timestamp < 30000);
+      signals.ice = signals.ice.filter(s => now - s.timestamp < 30000);
     }
   }
 }, 30000);
@@ -85,6 +97,10 @@ export default async function handler(req, res) {
       case 'cancel-search':
         result = handleCancelSearch(data);
         break;
+        
+      case 'acknowledge-signals':
+        result = handleAcknowledgeSignals(data, now);
+        break;
       
       default:
         result = { status: 'error', message: 'Unknown request type' };
@@ -116,6 +132,31 @@ function handleGetRequest(req, res) {
   };
   
   return res.status(200).json(stats);
+}
+
+function validateMatch(matchId, peerId, operation) {
+  const match = matches.get(matchId);
+  
+  if (!match) {
+    console.log(`[VALIDATION] Match ${matchId} not found for ${operation}`);
+    return { valid: false, error: 'Match not found' };
+  }
+  
+  // Check if peer is part of this match
+  if (match.peer1 !== peerId && match.peer2 !== peerId) {
+    console.log(`[VALIDATION] Peer ${peerId} not authorized for match ${matchId}`);
+    return { valid: false, error: 'Unauthorized' };
+  }
+  
+  // Check if match is not too old (10 minutes)
+  const now = Date.now();
+  if (now - match.timestamp > 600000) {
+    console.log(`[VALIDATION] Match ${matchId} expired`);
+    matches.delete(matchId); // Clean expired match
+    return { valid: false, error: 'Match expired' };
+  }
+  
+  return { valid: true, match: match };
 }
 
 function handleFindMatch(data, now) {
@@ -193,15 +234,13 @@ function handleExchangeOffer(data, now) {
   }
   
   try {
-    const match = matches.get(data.matchId);
-    if (!match) {
-      return { status: 'error', message: 'Match not found' };
+    // Validate match
+    const validation = validateMatch(data.matchId, data.peerId, 'exchange-offer');
+    if (!validation.valid) {
+      return { status: 'error', message: validation.error };
     }
     
-    // Verify peer is part of this match
-    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
-      return { status: 'error', message: 'Unauthorized' };
-    }
+    const match = validation.match;
     
     // Store offer for the other peer to retrieve
     const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
@@ -212,6 +251,8 @@ function handleExchangeOffer(data, now) {
     });
     
     matches.set(data.matchId, match);
+    
+    console.log(`[EXCHANGE] Offer stored for match ${data.matchId}: ${data.peerId} -> ${partnerId}`);
     
     return { 
       status: 'offer_stored',
@@ -231,15 +272,13 @@ function handleExchangeAnswer(data, now) {
   }
   
   try {
-    const match = matches.get(data.matchId);
-    if (!match) {
-      return { status: 'error', message: 'Match not found' };
+    // Validate match
+    const validation = validateMatch(data.matchId, data.peerId, 'exchange-answer');
+    if (!validation.valid) {
+      return { status: 'error', message: validation.error };
     }
     
-    // Verify peer is part of this match
-    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
-      return { status: 'error', message: 'Unauthorized' };
-    }
+    const match = validation.match;
     
     // Store answer for the other peer to retrieve
     const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
@@ -250,6 +289,8 @@ function handleExchangeAnswer(data, now) {
     });
     
     matches.set(data.matchId, match);
+    
+    console.log(`[EXCHANGE] Answer stored for match ${data.matchId}: ${data.peerId} -> ${partnerId}`);
     
     return { 
       status: 'answer_stored',
@@ -269,15 +310,13 @@ function handleExchangeIce(data, now) {
   }
   
   try {
-    const match = matches.get(data.matchId);
-    if (!match) {
-      return { status: 'error', message: 'Match not found' };
+    // Validate match
+    const validation = validateMatch(data.matchId, data.peerId, 'exchange-ice');
+    if (!validation.valid) {
+      return { status: 'error', message: validation.error };
     }
     
-    // Verify peer is part of this match
-    if (match.peer1 !== data.peerId && match.peer2 !== data.peerId) {
-      return { status: 'error', message: 'Unauthorized' };
-    }
+    const match = validation.match;
     
     // Store ICE candidate for the other peer to retrieve
     const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
@@ -315,13 +354,19 @@ function handleHeartbeat(data, now) {
     
     for (const [matchId, match] of matches.entries()) {
       if (match.peer1 === data.peerId || match.peer2 === data.peerId) {
+        // Validate match before proceeding
+        const validation = validateMatch(matchId, data.peerId, 'heartbeat');
+        if (!validation.valid) {
+          continue; // Skip invalid matches
+        }
+        
         matchInfo = {
           matchId: matchId,
           partnerId: match.peer1 === data.peerId ? match.peer2 : match.peer1,
           isInitiator: match.peer1 === data.peerId
         };
         
-        // Get and clear pending signals
+        // Get pending signals WITHOUT clearing them immediately
         const signals = match.signaling[data.peerId];
         pendingSignals = {
           offers: [...signals.offers],
@@ -329,12 +374,8 @@ function handleHeartbeat(data, now) {
           ice: [...signals.ice]
         };
         
-        // Clear retrieved signals
-        signals.offers = [];
-        signals.answers = [];
-        signals.ice = [];
+        console.log(`[HEARTBEAT] Signals for ${data.peerId}: offers=${signals.offers.length}, answers=${signals.answers.length}, ice=${signals.ice.length}`);
         
-        matches.set(matchId, match);
         break;
       }
     }
@@ -350,6 +391,56 @@ function handleHeartbeat(data, now) {
   } catch (error) {
     console.error('Heartbeat error:', error);
     return { status: 'error', message: 'Heartbeat failed' };
+  }
+}
+
+function handleAcknowledgeSignals(data, now) {
+  if (!data.peerId || !data.matchId) {
+    return { status: 'error', message: 'Missing required fields' };
+  }
+  
+  try {
+    // Validate match
+    const validation = validateMatch(data.matchId, data.peerId, 'acknowledge-signals');
+    if (!validation.valid) {
+      return { status: 'error', message: validation.error };
+    }
+    
+    const match = validation.match;
+    
+    // Clear acknowledged signals
+    const signals = match.signaling[data.peerId];
+    
+    if (data.acknowledgedOffers) {
+      signals.offers = signals.offers.filter(offer => 
+        !data.acknowledgedOffers.includes(offer.timestamp)
+      );
+    }
+    
+    if (data.acknowledgedAnswers) {
+      signals.answers = signals.answers.filter(answer => 
+        !data.acknowledgedAnswers.includes(answer.timestamp)
+      );
+    }
+    
+    if (data.acknowledgedIce) {
+      signals.ice = signals.ice.filter(ice => 
+        !data.acknowledgedIce.includes(ice.timestamp)
+      );
+    }
+    
+    matches.set(data.matchId, match);
+    
+    console.log(`[ACK] Signals acknowledged for ${data.peerId} in match ${data.matchId}`);
+    
+    return { 
+      status: 'acknowledged',
+      timestamp: now
+    };
+    
+  } catch (error) {
+    console.error('Acknowledge signals error:', error);
+    return { status: 'error', message: 'Acknowledge signals failed' };
   }
 }
 
