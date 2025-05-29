@@ -1,12 +1,15 @@
 {
   "version": 2,
-  "framework": null,
-  "buildCommand": "npm run build",
-  "outputDirectory": "build/client",
-  "installCommand": "npm install",
-  "functions": {
-    "server.mjs": {
-      "runtime": "nodejs18.x"
+  "builds": [
+    {
+      "src": "server.mjs",
+      "use": "@vercel/node@3.0.0"
     }
-  }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "server.mjs"
+    }
+  ]
 }
