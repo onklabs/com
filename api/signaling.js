@@ -11,7 +11,7 @@ setInterval(() => {
   
   // Clean expired heartbeats (2 minutes)
   for (const [peerId, lastSeen] of heartbeats.entries()) {
-    if (now - lastSeen > 120000) {
+    if (now - lastSeen > 30000) {
       heartbeats.delete(peerId);
       waitingQueue = waitingQueue.filter(p => p.peerId !== peerId);
     }
@@ -22,7 +22,7 @@ setInterval(() => {
   
   // Clean old matches (10 minutes - increased from 5 minutes)
   for (const [matchId, match] of matches.entries()) {
-    if (now - match.timestamp > 600000) {
+    if (now - match.timestamp > 150000) {
       matches.delete(matchId);
     }
   }
