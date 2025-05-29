@@ -1,15 +1,22 @@
 {
   "version": 2,
+  "buildCommand": "npm run build",
+  "installCommand": "npm install", 
+  "outputDirectory": ".",
   "builds": [
     {
-      "src": "server.mjs",
-      "use": "@vercel/node@3.0.0"
+      "src": "package.json",
+      "use": "@vercel/static-build"
     }
   ],
   "routes": [
     {
+      "src": "/build/(.*)",
+      "dest": "/build/$1"
+    },
+    {
       "src": "/(.*)",
-      "dest": "server.mjs"
+      "dest": "/api/index.js"
     }
   ]
 }
