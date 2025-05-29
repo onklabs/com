@@ -29,6 +29,7 @@
     "@remix-run/express": "^2.13.1",
     "@remix-run/node": "^2.13.1",
     "@remix-run/react": "^2.13.1",
+    "@remix-run/vercel": "^1.19.3",
     "@tailwindcss/container-queries": "^0.1.1",
     "bcryptjs": "^2.4.3",
     "class-variance-authority": "^0.7.0",

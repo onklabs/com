@@ -1,0 +1,12 @@
+{
+  "buildCommand": "remix build",
+  "outputDirectory": "build/client",
+  "devCommand": "remix dev",
+  "installCommand": "pnpm install",
+  "framework": null,
+  "functions": {
+    "app/entry.server.tsx": {
+      "runtime": "nodejs18.x"
+    }
+  }
+}
