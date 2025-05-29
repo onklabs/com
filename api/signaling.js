@@ -18,11 +18,11 @@ setInterval(() => {
   }
   
   // Clean old waiting queue entries (1 minute)
-  waitingQueue = waitingQueue.filter(p => now - p.timestamp < 60000);
+  waitingQueue = waitingQueue.filter(p => now - p.timestamp < 15000);
   
   // Clean old matches (10 minutes - increased from 5 minutes)
   for (const [matchId, match] of matches.entries()) {
-    if (now - match.timestamp > 10000) {
+    if (now - match.timestamp > 5000) {
       matches.delete(matchId);
     }
   }
@@ -33,9 +33,9 @@ setInterval(() => {
       const signals = match.signaling[peerId];
       
       // Clean old offers/answers/ice
-      signals.offers = signals.offers.filter(s => now - s.timestamp < 30000);
-      signals.answers = signals.answers.filter(s => now - s.timestamp < 30000);
-      signals.ice = signals.ice.filter(s => now - s.timestamp < 30000);
+      signals.offers = signals.offers.filter(s => now - s.timestamp < 8000);
+      signals.answers = signals.answers.filter(s => now - s.timestamp < 8000);
+      signals.ice = signals.ice.filter(s => now - s.timestamp < 8000);
     }
   }
 }, 30000);
