@@ -1,9 +1,10 @@
-// api/signaling.js - Fixed signaling server with match validation
+// api/signaling.js - Fixed signaling server with ICE rate limiting
 
 // In-memory storage
 let waitingQueue = [];
 let matches = new Map(); // Store temporary match info
 let heartbeats = new Map();
+let iceRateLimit = new Map(); // Track ICE candidate sending rate
 
 // Cleanup every 30 seconds
 setInterval(() => {
@@ -11,7 +12,7 @@ setInterval(() => {
   
   // Clean expired heartbeats (2 minutes)
   for (const [peerId, lastSeen] of heartbeats.entries()) {
-    if (now - lastSeen > 30000) {
+    if (now - lastSeen > 120000) {
       heartbeats.delete(peerId);
       waitingQueue = waitingQueue.filter(p => p.peerId !== peerId);
     }
@@ -22,7 +23,7 @@ setInterval(() => {
   
   // Clean old matches (10 minutes - increased from 5 minutes)
   for (const [matchId, match] of matches.entries()) {
-    if (now - match.timestamp > 150000) {
+    if (now - match.timestamp > 600000) {
       matches.delete(matchId);
     }
   }
@@ -36,6 +37,13 @@ setInterval(() => {
       signals.offers = signals.offers.filter(s => now - s.timestamp < 30000);
       signals.answers = signals.answers.filter(s => now - s.timestamp < 30000);
       signals.ice = signals.ice.filter(s => now - s.timestamp < 30000);
+    }
+  }
+  
+  // Clean old ICE rate limit entries (1 minute)
+  for (const [key, timestamp] of iceRateLimit.entries()) {
+    if (now - timestamp > 60000) {
+      iceRateLimit.delete(key);
     }
   }
 }, 30000);
@@ -310,6 +318,20 @@ function handleExchangeIce(data, now) {
   }
   
   try {
+    // Rate limiting for ICE candidates - max 10 per second per peer
+    const rateLimitKey = `${data.peerId}_${data.matchId}`;
+    const lastIceTime = iceRateLimit.get(rateLimitKey) || 0;
+    
+    if (now - lastIceTime < 100) { // 100ms minimum between ICE candidates
+      console.log(`[RATE_LIMIT] ICE candidate rejected for ${data.peerId} - too frequent`);
+      return { 
+        status: 'rate_limited',
+        message: 'ICE candidates sent too frequently',
+        retry_after: 100,
+        timestamp: now
+      };
+    }
+    
     // Validate match
     const validation = validateMatch(data.matchId, data.peerId, 'exchange-ice');
     if (!validation.valid) {
@@ -318,15 +340,39 @@ function handleExchangeIce(data, now) {
     
     const match = validation.match;
     
-    // Store ICE candidate for the other peer to retrieve
+    // Check for duplicate ICE candidates
     const partnerId = match.peer1 === data.peerId ? match.peer2 : match.peer1;
+    const existingIce = match.signaling[partnerId].ice;
+    
+    // Create a simple hash of the candidate to detect duplicates
+    const candidateHash = JSON.stringify(data.candidate);
+    const isDuplicate = existingIce.some(ice => 
+      JSON.stringify(ice.candidate) === candidateHash && 
+      now - ice.timestamp < 5000 // Only check for duplicates within 5 seconds
+    );
+    
+    if (isDuplicate) {
+      console.log(`[DUPLICATE] ICE candidate rejected for ${data.peerId} - duplicate detected`);
+      return { 
+        status: 'duplicate',
+        message: 'Duplicate ICE candidate',
+        timestamp: now
+      };
+    }
+    
+    // Store ICE candidate for the other peer to retrieve
     match.signaling[partnerId].ice.push({
       from: data.peerId,
       candidate: data.candidate,
       timestamp: now
     });
     
+    // Update rate limit
+    iceRateLimit.set(rateLimitKey, now);
+    
     matches.set(data.matchId, match);
+    
+    console.log(`[EXCHANGE] ICE candidate stored for match ${data.matchId}: ${data.peerId} -> ${partnerId}`);
     
     return { 
       status: 'ice_stored',
