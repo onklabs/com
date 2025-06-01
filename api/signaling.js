@@ -9,11 +9,11 @@ let heartbeats = new Map();
 let cleanupIntervals = new Map();
 
 const TIMEOUTS = {
-  WAITING: 60000,        // 1 minute in queue
-  MATCH: 600000,         // 10 minutes match lifetime  
-  HEARTBEAT: 120000,     // 2 minutes heartbeat
-  SIGNAL: 60000,         // 1 minute for signals
-  CLEANUP_INTERVAL: 120000 // Clean up every 2 minutes
+  WAITING: 45000,        // 45s in queue
+  MATCH: 400000,         // 6.7 minutes match lifetime
+  HEARTBEAT: 90000,      // 1.5 minutes heartbeat
+  SIGNAL: 45000,         // 45s for signals
+  CLEANUP_INTERVAL: 90000 // Clean up every 1.5 minutes
 };
 
 // Enhanced cleanup system
@@ -217,14 +217,14 @@ function updateHeartbeat(userId, timestamp) {
     console.log(`[HEARTBEAT] New user: ${userId}`);
   }
   
-  // Self-cleanup after timeout (backup to periodic cleanup)
-  setTimeout(() => {
-    const current = heartbeats.get(userId);
-    if (current === timestamp) {
-      heartbeats.delete(userId);
-      console.log(`[HEARTBEAT] Auto-cleaned expired heartbeat for ${userId}`);
-    }
-  }, TIMEOUTS.HEARTBEAT);
+  // ❌ REMOVED: Self-cleanup - let periodic cleanup handle this
+  // setTimeout(() => {
+  //   const current = heartbeats.get(userId);
+  //   if (current === timestamp) {
+  //     heartbeats.delete(userId);
+  //     console.log(`[HEARTBEAT] Auto-cleaned expired heartbeat for ${userId}`);
+  //   }
+  // }, TIMEOUTS.HEARTBEAT);
 }
 
 function getMatch(matchId) {
@@ -245,14 +245,14 @@ function setMatch(matchId, matchData) {
   matches.set(matchId, matchData);
   console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2})`);
   
-  // Self-cleanup after timeout
-  setTimeout(() => {
-    const current = matches.get(matchId);
-    if (current === matchData) {
-      deleteMatch(matchId);
-      console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
-    }
-  }, TIMEOUTS.MATCH);
+  // ❌ REMOVED: Self-cleanup causing immediate deletion
+  // setTimeout(() => {
+  //   const current = matches.get(matchId);
+  //   if (current === matchData) {
+  //     deleteMatch(matchId);
+  //     console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
+  //   }
+  // }, TIMEOUTS.MATCH);
 }
 
 function getUserMatch(userId) {
@@ -273,14 +273,14 @@ function setUserMatch(userId, matchId) {
   userMatches.set(userId, matchId);
   console.log(`[USER_MATCH] Set ${userId} -> ${matchId}`);
   
-  // Self-cleanup after timeout
-  setTimeout(() => {
-    const current = userMatches.get(userId);
-    if (current === matchId) {
-      userMatches.delete(userId);
-      console.log(`[USER_MATCH] Auto-cleaned ${userId} -> ${matchId}`);
-    }
-  }, TIMEOUTS.MATCH);
+  // ❌ REMOVED: Self-cleanup causing issues
+  // setTimeout(() => {
+  //   const current = userMatches.get(userId);
+  //   if (current === matchId) {
+  //     userMatches.delete(userId);
+  //     console.log(`[USER_MATCH] Auto-cleaned ${userId} -> ${matchId}`);
+  //   }
+  // }, TIMEOUTS.MATCH);
 }
 
 function deleteUserMatch(userId) {
@@ -340,9 +340,9 @@ function createLightweightMatch(peer1, peer2, now) {
     ts: now,
     st: 'signaling',
     to: {
-      o: now + 60000,  // 1 minute for offer
-      a: now + 60000,  // 1 minute for answer  
-      c: now + 300000  // 5 minutes for connection
+      o: now + 35000,  // 35s for offer (compromise)
+      a: now + 35000,  // 35s for answer (compromise)
+      c: now + 120000  // 2 minutes for connection
     },
     s: {
       [peer1]: { o: [], a: [], i: [], k: [] },
@@ -413,28 +413,37 @@ function compressMatch(match) {
 }
 
 async function validateMatch(matchId, peerId) {
+  console.log(`[VALIDATE] Checking match ${matchId} for user ${peerId}`);
+  
   if (!matchId || !peerId) {
+    console.log(`[VALIDATE] Missing parameters: matchId=${matchId}, peerId=${peerId}`);
     return { valid: false, error: 'Missing matchId or peerId' };
   }
   
   const match = getMatch(matchId);
   if (!match) {
     console.log(`[VALIDATE] Match not found: ${matchId}`);
+    console.log(`[VALIDATE] Available matches:`, Array.from(matches.keys()));
     return { valid: false, error: 'Match not found' };
   }
   
   if (match.p1 !== peerId && match.p2 !== peerId) {
     console.log(`[VALIDATE] Unauthorized access to match ${matchId} by ${peerId}`);
+    console.log(`[VALIDATE] Match participants: ${match.p1}, ${match.p2}`);
     return { valid: false, error: 'Unauthorized' };
   }
   
   const now = Date.now();
-  if (now - match.ts > TIMEOUTS.MATCH) {
-    console.log(`[VALIDATE] Match expired: ${matchId}`);
+  const matchAge = now - match.ts;
+  console.log(`[VALIDATE] Match age: ${matchAge}ms, timeout: ${TIMEOUTS.MATCH}ms`);
+  
+  if (matchAge > TIMEOUTS.MATCH) {
+    console.log(`[VALIDATE] Match expired: ${matchId} (age: ${matchAge}ms)`);
     deleteMatch(matchId);
     return { valid: false, error: 'Match expired' };
   }
   
+  console.log(`[VALIDATE] Match valid: ${matchId}`);
   return { valid: true, match: expandMatch(match) };
 }
 
@@ -484,12 +493,12 @@ async function handleFindMatch(data, now) {
       const expanded = expandMatch(existingMatch);
       const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
       
-      // Reset match status to allow reconnection with longer timeouts
+      // Reset match status to allow reconnection (moderate timeouts)
       existingMatch.st = 'signaling';
       existingMatch.to = {
-        o: now + 60000,   // 1 minute
-        a: now + 60000,   // 1 minute
-        c: now + 300000   // 5 minutes
+        o: now + 35000,
+        a: now + 35000, 
+        c: now + 120000
       };
       
       setMatch(existingMatchId, existingMatch);
@@ -531,10 +540,20 @@ async function handleFindMatch(data, now) {
     const matchId = `m_${now}_${Math.random().toString(36).substr(2, 8)}`;
     const matchInfo = createLightweightMatch(peer1, peer2, now);
     
+    // DEBUG: Log match creation details
+    console.log(`[MATCH_CREATE] Creating match ${matchId}`);
+    console.log(`[MATCH_CREATE] Peer1: ${peer1}, Peer2: ${peer2}`);
+    console.log(`[MATCH_CREATE] Initiator: ${deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id}`);
+    console.log(`[MATCH_CREATE] Match timeouts:`, matchInfo.to);
+    
     // Set up the match
     setMatch(matchId, matchInfo);
     setUserMatch(data.userId, matchId);
     setUserMatch(compatiblePeer.id, matchId);
+    
+    // DEBUG: Verify match was saved
+    const savedMatch = getMatch(matchId);
+    console.log(`[MATCH_CREATE] Match saved successfully:`, !!savedMatch);
     
     // Remove both users from queue
     const newQueue = queue.filter(p => p.id !== compatiblePeer.id);
