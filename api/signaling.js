@@ -727,13 +727,23 @@ async function handleExchangeSignals(data, now) {
     signalsAdded++;
   }
   
-  // Process acknowledgments - remove from current user's queue
+  // ✅ FIXED: Process acknowledgments - remove from current user's queue AND save match
   if (data.acknowledgeIds) {
     try {
-      const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
+      let ackIds = data.acknowledgeIds;
+      if (typeof ackIds === 'string') {
+        ackIds = JSON.parse(decodeURIComponent(ackIds));
+      }
+      
       if (Array.isArray(ackIds) && ackIds.length > 0) {
         const signals = match.signaling[data.userId];
         let ackedCount = 0;
+        
+        // Remove acknowledged signals
+        const beforeOffers = signals.offers.length;
+        const beforeAnswers = signals.answers.length;
+        const beforeIce = signals.ice.length;
+        const beforeAcks = signals.acks.length;
         
         signals.offers = signals.offers.filter(s => {
           if (ackIds.includes(s.id)) {
@@ -768,7 +778,11 @@ async function handleExchangeSignals(data, now) {
         });
         
         if (ackedCount > 0) {
-          console.log(`[SIGNALS] Acknowledged ${ackedCount} signals for ${data.userId}`);
+          console.log(`[SIGNALS] Acknowledged and removed ${ackedCount} signals for ${data.userId}`);
+          console.log(`[SIGNALS] Signal counts after ack - offers: ${beforeOffers}->${signals.offers.length}, answers: ${beforeAnswers}->${signals.answers.length}, ice: ${beforeIce}->${signals.ice.length}, acks: ${beforeAcks}->${signals.acks.length}`);
+          
+          // ✅ CRITICAL: Save match with updated signals after acknowledgment
+          setMatch(data.matchId, compressMatch(match));
         }
       }
     } catch (e) {
@@ -776,7 +790,7 @@ async function handleExchangeSignals(data, now) {
     }
   }
   
-  // Save updated match
+  // ✅ FIXED: Save updated match with new signals (moved before acknowledgment processing)
   setMatch(data.matchId, compressMatch(match));
   
   // ✅ FIXED: Return signals from CURRENT USER's queue (signals sent TO them)
