@@ -12,8 +12,36 @@ const TIMEOUTS = {
   SIGNAL: 30000 
 };
 
+// Helper function to parse request body
+async function parseBody(req) {
+  if (req.body) {
+    // Body already parsed by Vercel
+    return req.body;
+  }
+  
+  // Manual parsing if needed
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (error) {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 export default async function handler(req, res) {
-  // Fix CORS headers - thêm cache-control vào allowed headers
+  console.log('=== Signaling API Called ===');
+  console.log('Method:', req.method);
+  console.log('Content-Type:', req.headers['content-type']);
+  
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, X-Requested-With');
@@ -23,10 +51,12 @@ export default async function handler(req, res) {
   res.setHeader('Expires', '0');
   
   if (req.method === 'OPTIONS') {
+    console.log('OPTIONS request handled');
     return res.status(200).end();
   }
   
   if (req.method === 'GET') {
+    console.log('GET request - health check');
     try {
       const [waiting, matches] = await Promise.all([
         kv.get(WAITING_QUEUE_KEY),
@@ -39,59 +69,111 @@ export default async function handler(req, res) {
         timestamp: Date.now(),
         stats: {
           waiting: (waiting || []).length,
-          active_matches: matches.length
+          active_matches: matches?.length || 0
         }
       });
     } catch (error) {
+      console.error('GET error:', error);
       return res.status(200).json({
         service: 'WebRTC Signaling',
         status: 'online',
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        kv_status: 'error',
+        error: error.message
       });
     }
   }
   
   if (req.method !== 'POST') {
+    console.log('Method not allowed:', req.method);
     return res.status(405).json({ status: 'error', message: 'Method not allowed' });
   }
   
   try {
-    const data = req.body;
+    console.log('Parsing POST body...');
+    console.log('Raw body:', req.body);
+    
+    // Parse request body
+    let data;
+    try {
+      data = await parseBody(req);
+      console.log('Parsed data:', data);
+    } catch (parseError) {
+      console.error('Body parsing error:', parseError);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Invalid JSON in request body',
+        details: parseError.message 
+      });
+    }
+    
     const now = Date.now();
     
     if (!data?.type || !data?.userId) {
-      return res.status(400).json({ status: 'error', message: 'Invalid request' });
+      console.log('Invalid request data:', data);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Invalid request - missing type or userId',
+        received: data
+      });
     }
 
-    await updateHeartbeat(data.userId, now);
+    console.log('Processing request:', data.type, 'for user:', data.userId);
+    
+    // Test KV connection before processing
+    try {
+      await updateHeartbeat(data.userId, now);
+      console.log('Heartbeat updated successfully');
+    } catch (kvError) {
+      console.error('KV error during heartbeat update:', kvError);
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'Database connection error',
+        details: kvError.message 
+      });
+    }
 
     let result;
     switch (data.type) {
       case 'find-match':
+        console.log('Handling find-match');
         result = await handleFindMatch(data, now);
         break;
       case 'exchange-signals':
+        console.log('Handling exchange-signals');
         result = await handleExchangeSignals(data, now);
         break;
       case 'heartbeat':
+        console.log('Handling heartbeat');
         result = await handleHeartbeat(data, now);
         break;
       case 'disconnect':
+        console.log('Handling disconnect');
         result = await handleDisconnect(data);
         break;
       default:
-        result = { status: 'error', message: 'Unknown type' };
+        console.log('Unknown request type:', data.type);
+        result = { status: 'error', message: 'Unknown type: ' + data.type };
     }
     
+    console.log('Request processed successfully, result:', result);
     return res.status(result.status === 'error' ? 400 : 200).json(result);
     
   } catch (error) {
-    console.error('Server error:', error);
-    return res.status(500).json({ status: 'error', message: 'Server error' });
+    console.error('=== SERVER ERROR ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
+    return res.status(500).json({ 
+      status: 'error', 
+      message: 'Server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 }
 
 async function updateHeartbeat(userId, timestamp) {
+  console.log('Updating heartbeat for:', userId);
   await kv.setex(`${HEARTBEAT_PREFIX}${userId}`, Math.ceil(TIMEOUTS.HEARTBEAT / 1000), timestamp);
 }
 
