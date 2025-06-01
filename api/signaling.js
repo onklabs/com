@@ -12,31 +12,52 @@ const TIMEOUTS = {
   SIGNAL: 30000 
 };
 
+// Helper function to parse request body
+async function parseBody(req) {
+  if (req.body) {
+    // Body already parsed by Vercel
+    return req.body;
+  }
+  
+  // Manual parsing if needed
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (error) {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 export default async function handler(req, res) {
   console.log('=== Signaling API Called ===');
   console.log('Method:', req.method);
-  console.log('Query:', req.query);
+  console.log('Content-Type:', req.headers['content-type']);
   
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Credentials', 'false');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   
   if (req.method === 'OPTIONS') {
+    console.log('OPTIONS request handled');
     return res.status(200).end();
   }
   
-  if (req.method !== 'GET') {
-    return res.status(405).json({ status: 'error', message: 'Only GET method allowed' });
-  }
-  
-  try {
-    const { action, userId, ...params } = req.query;
-    const now = Date.now();
-    
-    // Health check
-    if (!action) {
+  if (req.method === 'GET') {
+    console.log('GET request - health check');
+    try {
       const [waiting, matches] = await Promise.all([
         kv.get(WAITING_QUEUE_KEY),
         kv.keys(`${MATCH_PREFIX}*`)
@@ -45,52 +66,114 @@ export default async function handler(req, res) {
       return res.status(200).json({
         service: 'WebRTC Signaling',
         status: 'online',
-        timestamp: now,
+        timestamp: Date.now(),
         stats: {
           waiting: (waiting || []).length,
           active_matches: matches?.length || 0
         }
       });
+    } catch (error) {
+      console.error('GET error:', error);
+      return res.status(200).json({
+        service: 'WebRTC Signaling',
+        status: 'online',
+        timestamp: Date.now(),
+        kv_status: 'error',
+        error: error.message
+      });
+    }
+  }
+  
+  if (req.method !== 'POST') {
+    console.log('Method not allowed:', req.method);
+    return res.status(405).json({ status: 'error', message: 'Method not allowed' });
+  }
+  
+  try {
+    console.log('Parsing POST body...');
+    console.log('Raw body:', req.body);
+    
+    // Parse request body
+    let data;
+    try {
+      data = await parseBody(req);
+      console.log('Parsed data:', data);
+    } catch (parseError) {
+      console.error('Body parsing error:', parseError);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Invalid JSON in request body',
+        details: parseError.message 
+      });
     }
     
-    if (!userId) {
-      return res.status(400).json({ status: 'error', message: 'Missing userId parameter' });
+    const now = Date.now();
+    
+    if (!data?.type || !data?.userId) {
+      console.log('Invalid request data:', data);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Invalid request - missing type or userId',
+        received: data
+      });
     }
 
-    console.log('Processing action:', action, 'for user:', userId);
-    await updateHeartbeat(userId, now);
+    console.log('Processing request:', data.type, 'for user:', data.userId);
+    
+    // Test KV connection before processing
+    try {
+      await updateHeartbeat(data.userId, now);
+      console.log('Heartbeat updated successfully');
+    } catch (kvError) {
+      console.error('KV error during heartbeat update:', kvError);
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'Database connection error',
+        details: kvError.message 
+      });
+    }
 
     let result;
-    switch (action) {
+    switch (data.type) {
       case 'find-match':
-        result = await handleFindMatch({ userId, ...params }, now);
+        console.log('Handling find-match');
+        result = await handleFindMatch(data, now);
         break;
       case 'exchange-signals':
-        result = await handleExchangeSignals({ userId, ...params }, now);
+        console.log('Handling exchange-signals');
+        result = await handleExchangeSignals(data, now);
         break;
       case 'heartbeat':
-        result = await handleHeartbeat({ userId, ...params }, now);
+        console.log('Handling heartbeat');
+        result = await handleHeartbeat(data, now);
         break;
       case 'disconnect':
-        result = await handleDisconnect({ userId, ...params });
+        console.log('Handling disconnect');
+        result = await handleDisconnect(data);
         break;
       default:
-        result = { status: 'error', message: 'Unknown action: ' + action };
+        console.log('Unknown request type:', data.type);
+        result = { status: 'error', message: 'Unknown type: ' + data.type };
     }
     
+    console.log('Request processed successfully, result:', result);
     return res.status(result.status === 'error' ? 400 : 200).json(result);
     
   } catch (error) {
-    console.error('Server error:', error);
+    console.error('=== SERVER ERROR ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
     return res.status(500).json({ 
       status: 'error', 
       message: 'Server error',
-      details: error.message
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
     });
   }
 }
 
 async function updateHeartbeat(userId, timestamp) {
+  console.log('Updating heartbeat for:', userId);
   await kv.setex(`${HEARTBEAT_PREFIX}${userId}`, Math.ceil(TIMEOUTS.HEARTBEAT / 1000), timestamp);
 }
 
@@ -269,9 +352,8 @@ async function handleFindMatch(data, now) {
   let queue = await getWaitingQueue();
   queue = queue.filter(p => now - p.ts < TIMEOUTS.WAITING && p.id !== data.userId);
   
-  const timezone = parseFloat(data.timezone) || 0;
   const compatiblePeer = queue.find(p => 
-    !timezone || !p.tz || Math.abs(p.tz - timezone) <= 12
+    !data.timezone || !p.tz || Math.abs(p.tz - data.timezone) <= 12
   );
   
   if (compatiblePeer) {
@@ -300,7 +382,7 @@ async function handleFindMatch(data, now) {
   
   queue.push({ 
     id: data.userId, 
-    tz: timezone,
+    tz: data.timezone || 0,
     ts: now
   });
   
@@ -328,59 +410,37 @@ async function handleExchangeSignals(data, now) {
   
   const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
   
-  // Parse complex data from query params
-  if (data.offer) {
-    try {
-      const offer = JSON.parse(decodeURIComponent(data.offer));
-      if (now < match.timeouts.offer) {
-        match.signaling[partnerId].offers.push({
-          f: data.userId,
-          d: offer,
-          ts: now,
-          id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
-        });
-      }
-    } catch (e) {
-      console.error('Failed to parse offer:', e);
-    }
+  if (data.offer && now < match.timeouts.offer) {
+    match.signaling[partnerId].offers.push({
+      f: data.userId,
+      d: data.offer,
+      ts: now,
+      id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
+    });
   }
   
-  if (data.answer) {
-    try {
-      const answer = JSON.parse(decodeURIComponent(data.answer));
-      if (now < match.timeouts.answer) {
-        match.signaling[partnerId].answers.push({
-          f: data.userId,
-          d: answer,
-          ts: now,
-          id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
-        });
-      }
-    } catch (e) {
-      console.error('Failed to parse answer:', e);
-    }
+  if (data.answer && now < match.timeouts.answer) {
+    match.signaling[partnerId].answers.push({
+      f: data.userId,
+      d: data.answer,
+      ts: now,
+      id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
+    });
   }
   
-  if (data.ice) {
-    try {
-      const ice = JSON.parse(decodeURIComponent(data.ice));
-      if (Array.isArray(ice) && now < match.timeouts.connection) {
-        const currentIce = match.signaling[partnerId].ice.length;
-        ice.slice(0, Math.max(0, 10 - currentIce)).forEach(candidate => {
-          match.signaling[partnerId].ice.push({
-            f: data.userId,
-            d: candidate,
-            ts: now,
-            id: `i_${now}_${Math.random().toString(36).substr(2, 4)}`
-          });
-        });
-      }
-    } catch (e) {
-      console.error('Failed to parse ice:', e);
-    }
+  if (data.ice && data.ice.length > 0 && now < match.timeouts.connection) {
+    const currentIce = match.signaling[partnerId].ice.length;
+    data.ice.slice(0, Math.max(0, 10 - currentIce)).forEach(candidate => {
+      match.signaling[partnerId].ice.push({
+        f: data.userId,
+        d: candidate,
+        ts: now,
+        id: `i_${now}_${Math.random().toString(36).substr(2, 4)}`
+      });
+    });
   }
   
-  if (data.connectionReady === 'true') {
+  if (data.connectionReady) {
     match.signaling[partnerId].acks.push({
       t: 'ready',
       f: data.userId,
@@ -390,7 +450,7 @@ async function handleExchangeSignals(data, now) {
     match.status = 'connected';
   }
   
-  if (data.ping === 'true') {
+  if (data.ping) {
     match.signaling[partnerId].acks.push({
       t: 'ping',
       f: data.userId,
@@ -399,18 +459,14 @@ async function handleExchangeSignals(data, now) {
     });
   }
   
-  if (data.acknowledgeIds) {
-    try {
-      const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
-      const signals = match.signaling[data.userId];
-      
-      signals.offers = signals.offers.filter(s => !ackIds.includes(s.id));
-      signals.answers = signals.answers.filter(s => !ackIds.includes(s.id));
-      signals.ice = signals.ice.filter(s => !ackIds.includes(s.id));
-      signals.acks = signals.acks.filter(s => !ackIds.includes(s.id));
-    } catch (e) {
-      console.error('Failed to parse acknowledgeIds:', e);
-    }
+  if (data.acknowledgeIds && data.acknowledgeIds.length > 0) {
+    const signals = match.signaling[data.userId];
+    const ackIds = data.acknowledgeIds;
+    
+    signals.offers = signals.offers.filter(s => !ackIds.includes(s.id));
+    signals.answers = signals.answers.filter(s => !ackIds.includes(s.id));
+    signals.ice = signals.ice.filter(s => !ackIds.includes(s.id));
+    signals.acks = signals.acks.filter(s => !ackIds.includes(s.id));
   }
   
   await setMatch(data.matchId, compressMatch(match));
