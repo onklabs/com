@@ -62,21 +62,25 @@ export default async function handler(req, res) {
   console.log('Method:', req.method);
   console.log('Query keys:', Object.keys(req.query));
   
-  // Enhanced CORS headers
+  // FIXED: Enhanced CORS headers with all necessary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods','POST', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 
+    'Content-Type, X-Requested-With, Authorization, Accept, Origin, Cache-Control, X-File-Name, X-File-Size, X-File-Type'
+  );
   res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  res.setHeader('Access-Control-Allow-Credentials', 'false');
   
   if (req.method === 'OPTIONS') {
+    console.log('[CORS] Handling preflight request');
     return res.status(200).end();
   }
   
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).json({ 
       status: 'error', 
-      message: 'Only GET method allowed',
-      allowed_methods: ['GET', 'OPTIONS', 'POST']
+      message: 'Only GET and POST methods allowed',
+      allowed_methods: ['GET', 'POST', 'OPTIONS']
     });
   }
   
@@ -99,7 +103,8 @@ export default async function handler(req, res) {
         status: 'online',
         timestamp: now,
         stats: stats,
-        version: '2.0.0'
+        version: '2.1.0',
+        cors_fixed: true
       });
     }
     
