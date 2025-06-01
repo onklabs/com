@@ -92,8 +92,26 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       requestData = req.query;
     } else if (req.method === 'POST') {
-      // Handle both JSON body and query params
-      requestData = { ...req.query, ...req.body };
+      // UPDATED: Chỉ thêm xử lý text/plain, giữ nguyên logic cũ
+      if (req.headers['content-type'] === 'text/plain') {
+        // Parse JSON từ text/plain body
+        try {
+          if (typeof req.body === 'string') {
+            requestData = JSON.parse(req.body);
+          } else {
+            requestData = req.body; // Đã là object rồi
+          }
+        } catch (parseError) {
+          console.error('[ERROR] Failed to parse text/plain body:', parseError.message);
+          return res.status(400).json({
+            status: 'error',
+            message: 'Invalid JSON in text/plain body'
+          });
+        }
+      } else {
+        // GIỮ NGUYÊN logic cũ cho application/json và form data
+        requestData = { ...req.query, ...req.body };
+      }
       
       // Convert client 'type' to server 'action'
       if (requestData.type && !requestData.action) {
