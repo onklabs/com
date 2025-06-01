@@ -340,9 +340,9 @@ function createLightweightMatch(peer1, peer2, now) {
     ts: now,
     st: 'signaling',
     to: {
-      o: now + 30000, // Longer offer timeout
-      a: now + 30000, // Longer answer timeout  
-      c: now + 120000 // Longer connection timeout
+      o: now + 45000, // Even longer offer timeout
+      a: now + 45000, // Even longer answer timeout  
+      c: now + 180000 // 3 minutes connection timeout
     },
     s: {
       [peer1]: { o: [], a: [], i: [], k: [] },
@@ -483,7 +483,18 @@ async function handleFindMatch(data, now) {
     if (existingMatch) {
       const expanded = expandMatch(existingMatch);
       const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
-      console.log(`[FIND_MATCH] Found existing match: ${existingMatchId}`);
+      
+      // Reset match status to allow reconnection
+      existingMatch.st = 'signaling';
+      existingMatch.to = {
+        o: now + 30000,
+        a: now + 30000, 
+        c: now + 120000
+      };
+      
+      setMatch(existingMatchId, existingMatch);
+      
+      console.log(`[FIND_MATCH] Found existing match: ${existingMatchId}, reset for reconnection`);
       
       return {
         status: 'matched',
@@ -491,6 +502,7 @@ async function handleFindMatch(data, now) {
         partnerId: partnerId,
         isInitiator: deterministic_initiator(data.userId, partnerId),
         existing: true,
+        reconnecting: true,
         timestamp: now
       };
     } else {
