@@ -191,20 +191,20 @@ export default async function handler(req, res) {
       case 'disconnect':
         result = await handleDisconnect({ userId, ...params });
         break;
-	case 'cleanup-match':
-	  const matchId = params.matchId;  // ✅ FIXED: Use 'params' not 'data'
-	  const reason = params.reason || 'unknown';  // ✅ FIXED
-	  
-	  console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
-	  
-	  const deleted = deleteMatch(matchId);
-	  result = {  // ✅ FIXED: Assign to 'result' variable
-		status: 'success',
-		message: deleted ? 'Match deleted' : 'Match already deleted',
-		cleaned: deleted,
-		reason: reason
-	  };
-	  break;
+      case 'cleanup-match':
+        const matchId = params.matchId;
+        const reason = params.reason || 'unknown';
+        
+        console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
+        
+        const deleted = deleteMatch(matchId);
+        result = {
+          status: 'success',
+          message: deleted ? 'Match deleted' : 'Match already deleted',
+          cleaned: deleted,
+          reason: reason
+        };
+        break;
       default:
         result = { 
           status: 'error', 
@@ -248,15 +248,6 @@ function updateHeartbeat(userId, timestamp) {
   if (!previous) {
     console.log(`[HEARTBEAT] New user: ${userId}`);
   }
-  
-  // ❌ REMOVED: Self-cleanup - let periodic cleanup handle this
-  // setTimeout(() => {
-  //   const current = heartbeats.get(userId);
-  //   if (current === timestamp) {
-  //     heartbeats.delete(userId);
-  //     console.log(`[HEARTBEAT] Auto-cleaned expired heartbeat for ${userId}`);
-  //   }
-  // }, TIMEOUTS.HEARTBEAT);
 }
 
 function getMatch(matchId) {
@@ -276,15 +267,6 @@ function getMatch(matchId) {
 function setMatch(matchId, matchData) {
   matches.set(matchId, matchData);
   console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2})`);
-  
-  // ❌ REMOVED: Self-cleanup causing immediate deletion
-  // setTimeout(() => {
-  //   const current = matches.get(matchId);
-  //   if (current === matchData) {
-  //     deleteMatch(matchId);
-  //     console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
-  //   }
-  // }, TIMEOUTS.MATCH);
 }
 
 function getUserMatch(userId) {
@@ -304,15 +286,6 @@ function getUserMatch(userId) {
 function setUserMatch(userId, matchId) {
   userMatches.set(userId, matchId);
   console.log(`[USER_MATCH] Set ${userId} -> ${matchId}`);
-  
-  // ❌ REMOVED: Self-cleanup causing issues
-  // setTimeout(() => {
-  //   const current = userMatches.get(userId);
-  //   if (current === matchId) {
-  //     userMatches.delete(userId);
-  //     console.log(`[USER_MATCH] Auto-cleaned ${userId} -> ${matchId}`);
-  //   }
-  // }, TIMEOUTS.MATCH);
 }
 
 function deleteUserMatch(userId) {
@@ -642,7 +615,7 @@ async function handleExchangeSignals(data, now) {
   const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
   let signalsAdded = 0;
   
-  // Enhanced signal parsing with better error handling
+  // ✅ FIXED: Enhanced signal storage - store in partner's queue so they can receive it
   if (data.offer) {
     try {
       // Handle both string and object offer
@@ -652,6 +625,7 @@ async function handleExchangeSignals(data, now) {
       }
       
       if (now < match.timeouts.offer) {
+        // ✅ FIXED: Store offer in PARTNER's queue so they receive it
         match.signaling[partnerId].offers.push({
           f: data.userId,
           d: offer,
@@ -659,7 +633,7 @@ async function handleExchangeSignals(data, now) {
           id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
         });
         signalsAdded++;
-        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
+        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}'s queue`);
       } else {
         console.log(`[SIGNALS] Offer timeout expired for ${data.userId}`);
       }
@@ -677,6 +651,7 @@ async function handleExchangeSignals(data, now) {
       }
       
       if (now < match.timeouts.answer) {
+        // ✅ FIXED: Store answer in PARTNER's queue so they receive it
         match.signaling[partnerId].answers.push({
           f: data.userId,
           d: answer,
@@ -684,7 +659,7 @@ async function handleExchangeSignals(data, now) {
           id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
         });
         signalsAdded++;
-        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
+        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}'s queue`);
       } else {
         console.log(`[SIGNALS] Answer timeout expired for ${data.userId}`);
       }
@@ -707,6 +682,7 @@ async function handleExchangeSignals(data, now) {
         const candidatesToAdd = ice.slice(0, availableSlots);
         
         candidatesToAdd.forEach(candidate => {
+          // ✅ FIXED: Store ICE in PARTNER's queue so they receive it
           match.signaling[partnerId].ice.push({
             f: data.userId,
             d: candidate,
@@ -717,7 +693,7 @@ async function handleExchangeSignals(data, now) {
         });
         
         if (candidatesToAdd.length > 0) {
-          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
+          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId} to ${partnerId}'s queue`);
         }
       } else {
         console.log(`[SIGNALS] ICE timeout expired or invalid format for ${data.userId}`);
@@ -736,7 +712,7 @@ async function handleExchangeSignals(data, now) {
       id: `r_${now}_${Math.random().toString(36).substr(2, 4)}`
     });
     match.status = 'connected';
-    console.log(`[SIGNALS] Connection ready from ${data.userId}`);
+    console.log(`[SIGNALS] Connection ready from ${data.userId} to ${partnerId}'s queue`);
     signalsAdded++;
   }
   
@@ -747,11 +723,11 @@ async function handleExchangeSignals(data, now) {
       ts: now,
       id: `p_${now}_${Math.random().toString(36).substr(2, 4)}`
     });
-    console.log(`[SIGNALS] Ping from ${data.userId}`);
+    console.log(`[SIGNALS] Ping from ${data.userId} to ${partnerId}'s queue`);
     signalsAdded++;
   }
   
-  // Process acknowledgments
+  // Process acknowledgments - remove from current user's queue
   if (data.acknowledgeIds) {
     try {
       const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
@@ -803,7 +779,7 @@ async function handleExchangeSignals(data, now) {
   // Save updated match
   setMatch(data.matchId, compressMatch(match));
   
-  // Prepare response with pending signals
+  // ✅ FIXED: Return signals from CURRENT USER's queue (signals sent TO them)
   const mySignals = match.signaling[data.userId];
   const pendingSignals = {
     offers: mySignals.offers.map(s => ({
@@ -842,6 +818,7 @@ async function handleExchangeSignals(data, now) {
   const totalPending = allSignalIds.length;
   if (totalPending > 0) {
     console.log(`[SIGNALS] Returning ${totalPending} pending signals to ${data.userId}`);
+    console.log(`[SIGNALS] Signal types: offers=${pendingSignals.offers.length}, answers=${pendingSignals.answers.length}, ice=${pendingSignals.ice.length}, acks=${pendingSignals.acks.length}`);
   }
   
   return {
