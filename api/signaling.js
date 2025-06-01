@@ -611,7 +611,35 @@ async function handleFindMatch(data, now) {
     timestamp: now
   };
 }
+// Utility function to safely parse data that might be URL-encoded or direct JSON
+function safeParseData(data) {
+  if (!data) return null;
+  
+  // If already an object, return as-is
+  if (typeof data === 'object') {
+    return data;
+  }
+  
+  // If string, try to parse
+  if (typeof data === 'string') {
+    try {
+      // First try direct JSON parse
+      return JSON.parse(data);
+    } catch (directParseError) {
+      try {
+        // Then try with URL decode first
+        return JSON.parse(decodeURIComponent(data));
+      } catch (urlDecodeError) {
+        console.error('Failed to parse data:', data, directParseError.message, urlDecodeError.message);
+        return null;
+      }
+    }
+  }
+  
+  return null;
+}
 
+// Updated handleExchangeSignals function with safer parsing
 async function handleExchangeSignals(data, now) {
   if (!data.matchId) {
     console.log('[EXCHANGE] Missing matchId');
@@ -633,16 +661,12 @@ async function handleExchangeSignals(data, now) {
   const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
   let signalsAdded = 0;
   
-  // Enhanced signal parsing with better error handling
+  // UPDATED: Enhanced signal parsing with safer method
   if (data.offer) {
     try {
-      // Handle both string and object offer
-      let offer = data.offer;
-      if (typeof offer === 'string') {
-        offer = JSON.parse(decodeURIComponent(offer));
-      }
+      const offer = safeParseData(data.offer);
       
-      if (now < match.timeouts.offer) {
+      if (offer && now < match.timeouts.offer) {
         match.signaling[partnerId].offers.push({
           f: data.userId,
           d: offer,
@@ -651,23 +675,21 @@ async function handleExchangeSignals(data, now) {
         });
         signalsAdded++;
         console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
+      } else if (!offer) {
+        console.error('[SIGNALS] Failed to parse offer data');
       } else {
         console.log(`[SIGNALS] Offer timeout expired for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse offer:', e.message, 'Data:', data.offer);
+      console.error('[SIGNALS] Failed to process offer:', e.message, 'Data:', data.offer);
     }
   }
   
   if (data.answer) {
     try {
-      // Handle both string and object answer
-      let answer = data.answer;
-      if (typeof answer === 'string') {
-        answer = JSON.parse(decodeURIComponent(answer));
-      }
+      const answer = safeParseData(data.answer);
       
-      if (now < match.timeouts.answer) {
+      if (answer && now < match.timeouts.answer) {
         match.signaling[partnerId].answers.push({
           f: data.userId,
           d: answer,
@@ -676,25 +698,23 @@ async function handleExchangeSignals(data, now) {
         });
         signalsAdded++;
         console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
+      } else if (!answer) {
+        console.error('[SIGNALS] Failed to parse answer data');
       } else {
         console.log(`[SIGNALS] Answer timeout expired for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse answer:', e.message, 'Data:', data.answer);
+      console.error('[SIGNALS] Failed to process answer:', e.message, 'Data:', data.answer);
     }
   }
   
   if (data.ice) {
     try {
-      // Handle both string and array ice
-      let ice = data.ice;
-      if (typeof ice === 'string') {
-        ice = JSON.parse(decodeURIComponent(ice));
-      }
+      const ice = safeParseData(data.ice);
       
       if (Array.isArray(ice) && now < match.timeouts.connection) {
         const currentIce = match.signaling[partnerId].ice.length;
-        const availableSlots = Math.max(0, 15 - currentIce); // Increased limit
+        const availableSlots = Math.max(0, 15 - currentIce);
         const candidatesToAdd = ice.slice(0, availableSlots);
         
         candidatesToAdd.forEach(candidate => {
@@ -710,16 +730,18 @@ async function handleExchangeSignals(data, now) {
         if (candidatesToAdd.length > 0) {
           console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
         }
+      } else if (!ice) {
+        console.error('[SIGNALS] Failed to parse ICE data');
       } else {
         console.log(`[SIGNALS] ICE timeout expired or invalid format for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse ICE candidates:', e.message, 'Data:', data.ice);
+      console.error('[SIGNALS] Failed to process ICE candidates:', e.message, 'Data:', data.ice);
     }
   }
   
-  // Handle acknowledgments and special signals
-  if (data.connectionReady === 'true') {
+  // Handle acknowledgments and special signals (no change needed)
+  if (data.connectionReady === 'true' || data.connectionReady === true) {
     match.signaling[partnerId].acks.push({
       t: 'ready',
       f: data.userId,
@@ -731,7 +753,7 @@ async function handleExchangeSignals(data, now) {
     signalsAdded++;
   }
   
-  if (data.ping === 'true') {
+  if (data.ping === 'true' || data.ping === true) {
     match.signaling[partnerId].acks.push({
       t: 'ping',
       f: data.userId,
@@ -742,10 +764,11 @@ async function handleExchangeSignals(data, now) {
     signalsAdded++;
   }
   
-  // Process acknowledgments
+  // UPDATED: Process acknowledgments with safer parsing
   if (data.acknowledgeIds) {
     try {
-      const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
+      const ackIds = safeParseData(data.acknowledgeIds);
+      
       if (Array.isArray(ackIds) && ackIds.length > 0) {
         const signals = match.signaling[data.userId];
         let ackedCount = 0;
@@ -785,16 +808,18 @@ async function handleExchangeSignals(data, now) {
         if (ackedCount > 0) {
           console.log(`[SIGNALS] Acknowledged ${ackedCount} signals for ${data.userId}`);
         }
+      } else if (data.acknowledgeIds) {
+        console.error('[SIGNALS] Failed to parse acknowledgeIds or not an array');
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse acknowledgeIds:', e.message);
+      console.error('[SIGNALS] Failed to process acknowledgeIds:', e.message);
     }
   }
   
   // Save updated match
   setMatch(data.matchId, compressMatch(match));
   
-  // Prepare response with pending signals
+  // Prepare response with pending signals (no change needed)
   const mySignals = match.signaling[data.userId];
   const pendingSignals = {
     offers: mySignals.offers.map(s => ({
@@ -845,7 +870,7 @@ async function handleExchangeSignals(data, now) {
     timestamp: now
   };
 }
-
+ 
 async function handleHeartbeat(data, now) {
   const existingMatchId = getUserMatch(data.userId);
   if (existingMatchId) {
