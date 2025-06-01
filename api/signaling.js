@@ -173,6 +173,13 @@ export default async function handler(req, res) {
       case 'disconnect':
         result = await handleDisconnect({ userId, ...params });
         break;
+	case 'cleanup-match':
+	  const deleted = deleteMatch(data.matchId);
+	  return {
+		status: 'success',
+		message: deleted ? 'Match deleted' : 'Match already deleted',
+		cleaned: deleted
+	  };  
       default:
         result = { 
           status: 'error', 
