@@ -230,47 +230,40 @@
     }
 
     // Enhanced GET API call with improved error handling
-    async function apiCall(data) {
-      try {
-        const params = new URLSearchParams();
-        params.append('userId', myUserId);
-        
-        for (const [key, value] of Object.entries(data)) {
-          if (value !== undefined && value !== null) {
-            if (typeof value === 'object') {
-              params.append(key, encodeURIComponent(JSON.stringify(value)));
-            } else if (typeof value === 'boolean') {
-              params.append(key, value.toString());
-            } else {
-              params.append(key, value);
-            }
-          }
+ async function apiCall(data) {
+  try {
+    const params = new URLSearchParams();
+    params.append('userId', myUserId);
+    
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined && value !== null) {
+        if (typeof value === 'object') {
+          params.append(key, encodeURIComponent(JSON.stringify(value)));
+        } else if (typeof value === 'boolean') {
+          params.append(key, value.toString());
+        } else {
+          params.append(key, value);
         }
-        
-        const url = `${signalingUrl}?${params.toString()}`;
-        console.log(`[API] ${data.action || 'health-check'} request`);
-        
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: { 
-            'Cache-Control': 'no-cache'
-          }
-        });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const result = await response.json();
-        console.log(`[API] ${data.action || 'health-check'} response:`, result.status);
-        return result;
-        
-      } catch (error) {
-        console.error(`[API] ${data.action || 'health-check'} failed:`, error);
-        throw new Error(`API call failed: ${error.message}`);
       }
     }
-
+    
+    const url = `${signalingUrl}?${params.toString()}`;
+    
+    // Bỏ headers hoàn toàn
+    const response = await fetch(url, {
+      method: 'GET'
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json();
+    
+  } catch (error) {
+    throw new Error(`API call failed: ${error.message}`);
+  }
+}
     async function startMatchFinding() {
       // Prevent multiple simultaneous connection attempts
       if (isConnecting) {
