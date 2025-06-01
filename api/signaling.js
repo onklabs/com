@@ -9,7 +9,7 @@ const TIMEOUTS = {
   WAITING: 30000,
   MATCH: 300000,
   HEARTBEAT: 60000,
-  SIGNAL: 30000
+  SIGNAL: 30000 
 };
 
 export default async function handler(req, res) {
