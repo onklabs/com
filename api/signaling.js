@@ -61,6 +61,7 @@ export default async function handler(req, res) {
   console.log('=== Enhanced Signaling API Called ===');
   console.log('Method:', req.method);
   console.log('Query keys:', Object.keys(req.query));
+  console.log('Body:', req.body);
   
   // FIXED: Enhanced CORS headers with all necessary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -85,7 +86,23 @@ export default async function handler(req, res) {
   }
   
   try {
-    const { action, userId, ...params } = req.query;
+    // Support both GET (query params) and POST (body)
+    let requestData = {};
+    
+    if (req.method === 'GET') {
+      requestData = req.query;
+    } else if (req.method === 'POST') {
+      // Handle both JSON body and query params
+      requestData = { ...req.query, ...req.body };
+      
+      // Convert client 'type' to server 'action'
+      if (requestData.type && !requestData.action) {
+        requestData.action = requestData.type;
+        delete requestData.type;
+      }
+    }
+    
+    const { action, userId, ...params } = requestData;
     const now = Date.now();
     
     // Enhanced health check with detailed stats
