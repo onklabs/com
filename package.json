@@ -1,0 +1,21 @@
+{
+  "name": "webrtc-optimized-chat",
+  "version": "1.0.0",
+  "description": "Optimized WebRTC Chat with Vercel KV",
+  "main": "api/signaling.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'No build step required'",
+    "start": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@vercel/kv": "^3.0.0"
+  },
+  "devDependencies": {
+    "vercel": "^25.2.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
