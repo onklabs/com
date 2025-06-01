@@ -10,7 +10,7 @@ const TIMEOUTS = {
   MATCH: 300000,
   HEARTBEAT: 60000,
   SIGNAL: 30000 
-};
+}; 
 
 // Helper function to parse request body
 async function parseBody(req) {
