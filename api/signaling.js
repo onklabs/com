@@ -10,7 +10,7 @@ let cleanupIntervals = new Map();
 
 const TIMEOUTS = {
   WAITING: 45000,        // 45s in queue
-  MATCH: 400000,         // 6.7 minutes match lifetime
+  MATCH: 90000,         // 1.5 minutes match lifetime (changed from 400000)
   HEARTBEAT: 90000,      // 1.5 minutes heartbeat
   SIGNAL: 45000,         // 45s for signals
   CLEANUP_INTERVAL: 90000 // Clean up every 1.5 minutes
@@ -54,6 +54,36 @@ function startPeriodicCleanup() {
   }
 }
 
+// NEW: Function to clean expired matches on every request
+function cleanExpiredMatches() {
+  const now = Date.now();
+  let cleanedCount = 0;
+  const expiredMatches = [];
+  
+  // Find all expired matches
+  for (const [matchId, match] of matches.entries()) {
+    const matchAge = now - match.ts;
+    if (matchAge > TIMEOUTS.MATCH) {
+      expiredMatches.push({ matchId, match, age: matchAge });
+    }
+  }
+  
+  // Remove expired matches
+  for (const { matchId, match, age } of expiredMatches) {
+    matches.delete(matchId);
+    userMatches.delete(match.p1);
+    userMatches.delete(match.p2);
+    cleanedCount++;
+    console.log(`[REQUEST_CLEANUP] Removed expired match ${matchId} (age: ${Math.floor(age/1000)}s) - users: ${match.p1}, ${match.p2}`);
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`[REQUEST_CLEANUP] Cleaned ${cleanedCount} expired matches from ${matches.size + cleanedCount} total matches`);
+  }
+  
+  return cleanedCount;
+}
+
 // Start cleanup when module loads
 startPeriodicCleanup();
 
@@ -62,6 +92,9 @@ export default async function handler(req, res) {
   console.log('Method:', req.method);
   console.log('Query keys:', Object.keys(req.query));
   console.log('Body:', req.body);
+  
+  // NEW: Clean expired matches on every request
+  const cleanedMatches = cleanExpiredMatches();
   
   // FIXED: Enhanced CORS headers with all necessary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -116,12 +149,14 @@ export default async function handler(req, res) {
       console.log('[DEBUG] Invalid userId format:', userId, typeof userId);
     }
     
-    // Enhanced health check with detailed stats
+    // Enhanced health check with detailed stats including cleanup info
     if (!action) {
       const stats = {
         waiting: waitingQueue.length,
         active_matches: matches.size,
         active_users: heartbeats.size,
+        matches_cleaned_this_request: cleanedMatches,
+        match_timeout_minutes: TIMEOUTS.MATCH / 60000,
         server_uptime: process.uptime ? Math.floor(process.uptime()) : 'unknown',
         memory_usage: process.memoryUsage ? process.memoryUsage() : 'unknown'
       };
@@ -131,8 +166,9 @@ export default async function handler(req, res) {
         status: 'online',
         timestamp: now,
         stats: stats,
-        version: '2.1.0',
-        cors_fixed: true
+        version: '2.2.0',
+        cors_fixed: true,
+        cleanup_enabled: true
       });
     }
     
@@ -173,24 +209,25 @@ export default async function handler(req, res) {
       case 'disconnect':
         result = await handleDisconnect({ userId, ...params });
         break;
-		case 'cleanup-match':
-		  const matchId = data.matchId;
-		  const reason = data.reason || 'unknown';
-		  
-		  console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
-		  
-		  const deleted = deleteMatch(matchId);
-		  return {
-			status: 'success',
-			message: deleted ? 'Match deleted' : 'Match already deleted',
-			cleaned: deleted,
-			reason: reason
-		  };
+      case 'cleanup-match':
+        const matchId = params.matchId;
+        const reason = params.reason || 'unknown';
+        
+        console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
+        
+        const deleted = deleteMatch(matchId);
+        result = {
+          status: 'success',
+          message: deleted ? 'Match deleted' : 'Match already deleted',
+          cleaned: deleted,
+          reason: reason
+        };
+        break;
       default:
         result = { 
           status: 'error', 
           message: `Unknown action: ${action}`,
-          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect']
+          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect', 'cleanup-match']
         };
     }
     
@@ -229,22 +266,13 @@ function updateHeartbeat(userId, timestamp) {
   if (!previous) {
     console.log(`[HEARTBEAT] New user: ${userId}`);
   }
-  
-  // ❌ REMOVED: Self-cleanup - let periodic cleanup handle this
-  // setTimeout(() => {
-  //   const current = heartbeats.get(userId);
-  //   if (current === timestamp) {
-  //     heartbeats.delete(userId);
-  //     console.log(`[HEARTBEAT] Auto-cleaned expired heartbeat for ${userId}`);
-  //   }
-  // }, TIMEOUTS.HEARTBEAT);
 }
 
 function getMatch(matchId) {
   if (!matchId) return null;
   const match = matches.get(matchId);
   
-  // Check if match is expired
+  // Check if match is expired (this check is now redundant since we clean on every request)
   if (match && Date.now() - match.ts > TIMEOUTS.MATCH) {
     deleteMatch(matchId);
     console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
@@ -256,16 +284,7 @@ function getMatch(matchId) {
 
 function setMatch(matchId, matchData) {
   matches.set(matchId, matchData);
-  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2})`);
-  
-  // ❌ REMOVED: Self-cleanup causing immediate deletion
-  // setTimeout(() => {
-  //   const current = matches.get(matchId);
-  //   if (current === matchData) {
-  //     deleteMatch(matchId);
-  //     console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
-  //   }
-  // }, TIMEOUTS.MATCH);
+  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2}) - expires in ${TIMEOUTS.MATCH/60000} minutes`);
 }
 
 function getUserMatch(userId) {
@@ -285,15 +304,6 @@ function getUserMatch(userId) {
 function setUserMatch(userId, matchId) {
   userMatches.set(userId, matchId);
   console.log(`[USER_MATCH] Set ${userId} -> ${matchId}`);
-  
-  // ❌ REMOVED: Self-cleanup causing issues
-  // setTimeout(() => {
-  //   const current = userMatches.get(userId);
-  //   if (current === matchId) {
-  //     userMatches.delete(userId);
-  //     console.log(`[USER_MATCH] Auto-cleaned ${userId} -> ${matchId}`);
-  //   }
-  // }, TIMEOUTS.MATCH);
 }
 
 function deleteUserMatch(userId) {
@@ -554,7 +564,7 @@ async function handleFindMatch(data, now) {
     const matchInfo = createLightweightMatch(peer1, peer2, now);
     
     // DEBUG: Log match creation details
-    console.log(`[MATCH_CREATE] Creating match ${matchId}`);
+    console.log(`[MATCH_CREATE] Creating match ${matchId} - will expire in ${TIMEOUTS.MATCH/60000} minutes`);
     console.log(`[MATCH_CREATE] Peer1: ${peer1}, Peer2: ${peer2}`);
     console.log(`[MATCH_CREATE] Initiator: ${deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id}`);
     console.log(`[MATCH_CREATE] Match timeouts:`, matchInfo.to);
