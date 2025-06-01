@@ -371,18 +371,14 @@ function setWaitingQueue(queue) {
 }
 
 function deterministic_initiator(peer1, peer2) {
-  // OLD:
-  // return peer1.localeCompare(peer2) < 0;
+  // Super simple, guaranteed to work everywhere
+  const p1_prefix = peer1.substring(0, 8);
+  const p2_prefix = peer2.substring(0, 8);
   
-  // NEW - Option 2: Hash-based (recommended)
-  const combined = [peer1, peer2].sort().join('');
-  let hash = 0;
-  
-  for (let i = 0; i < combined.length; i++) {
-    const char = combined.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
+  const result = p1_prefix < p2_prefix; // Even simpler than localeCompare
+  console.log(`Simple initiator: ${p1_prefix} vs ${p2_prefix} → ${result ? peer1 : peer2}`);
+  return result;
+}
 
 function createLightweightMatch(peer1, peer2, now) {
   return {
