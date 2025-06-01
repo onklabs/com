@@ -10,7 +10,7 @@ let cleanupIntervals = new Map();
 
 const TIMEOUTS = {
   WAITING: 45000,        // 45s in queue
-  MATCH: 90000,         // 1.5 minutes match lifetime (changed from 400000)
+  MATCH: 400000,         // 6.7 minutes match lifetime
   HEARTBEAT: 90000,      // 1.5 minutes heartbeat
   SIGNAL: 45000,         // 45s for signals
   CLEANUP_INTERVAL: 90000 // Clean up every 1.5 minutes
@@ -54,36 +54,6 @@ function startPeriodicCleanup() {
   }
 }
 
-// NEW: Function to clean expired matches on every request
-function cleanExpiredMatches() {
-  const now = Date.now();
-  let cleanedCount = 0;
-  const expiredMatches = [];
-  
-  // Find all expired matches
-  for (const [matchId, match] of matches.entries()) {
-    const matchAge = now - match.ts;
-    if (matchAge > TIMEOUTS.MATCH) {
-      expiredMatches.push({ matchId, match, age: matchAge });
-    }
-  }
-  
-  // Remove expired matches
-  for (const { matchId, match, age } of expiredMatches) {
-    matches.delete(matchId);
-    userMatches.delete(match.p1);
-    userMatches.delete(match.p2);
-    cleanedCount++;
-    console.log(`[REQUEST_CLEANUP] Removed expired match ${matchId} (age: ${Math.floor(age/1000)}s) - users: ${match.p1}, ${match.p2}`);
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`[REQUEST_CLEANUP] Cleaned ${cleanedCount} expired matches from ${matches.size + cleanedCount} total matches`);
-  }
-  
-  return cleanedCount;
-}
-
 // Start cleanup when module loads
 startPeriodicCleanup();
 
@@ -92,9 +62,6 @@ export default async function handler(req, res) {
   console.log('Method:', req.method);
   console.log('Query keys:', Object.keys(req.query));
   console.log('Body:', req.body);
-  
-  // NEW: Clean expired matches on every request
-  const cleanedMatches = cleanExpiredMatches();
   
   // FIXED: Enhanced CORS headers with all necessary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -125,8 +92,26 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       requestData = req.query;
     } else if (req.method === 'POST') {
-      // Handle both JSON body and query params
-      requestData = { ...req.query, ...req.body };
+      // UPDATED: Chỉ thêm xử lý text/plain, giữ nguyên logic cũ
+      if (req.headers['content-type'] === 'text/plain') {
+        // Parse JSON từ text/plain body
+        try {
+          if (typeof req.body === 'string') {
+            requestData = JSON.parse(req.body);
+          } else {
+            requestData = req.body; // Đã là object rồi
+          }
+        } catch (parseError) {
+          console.error('[ERROR] Failed to parse text/plain body:', parseError.message);
+          return res.status(400).json({
+            status: 'error',
+            message: 'Invalid JSON in text/plain body'
+          });
+        }
+      } else {
+        // GIỮ NGUYÊN logic cũ cho application/json và form data
+        requestData = { ...req.query, ...req.body };
+      }
       
       // Convert client 'type' to server 'action'
       if (requestData.type && !requestData.action) {
@@ -149,14 +134,12 @@ export default async function handler(req, res) {
       console.log('[DEBUG] Invalid userId format:', userId, typeof userId);
     }
     
-    // Enhanced health check with detailed stats including cleanup info
+    // Enhanced health check with detailed stats
     if (!action) {
       const stats = {
         waiting: waitingQueue.length,
         active_matches: matches.size,
         active_users: heartbeats.size,
-        matches_cleaned_this_request: cleanedMatches,
-        match_timeout_minutes: TIMEOUTS.MATCH / 60000,
         server_uptime: process.uptime ? Math.floor(process.uptime()) : 'unknown',
         memory_usage: process.memoryUsage ? process.memoryUsage() : 'unknown'
       };
@@ -166,9 +149,8 @@ export default async function handler(req, res) {
         status: 'online',
         timestamp: now,
         stats: stats,
-        version: '2.2.0',
-        cors_fixed: true,
-        cleanup_enabled: true
+        version: '2.1.0',
+        cors_fixed: true
       });
     }
     
@@ -227,7 +209,7 @@ export default async function handler(req, res) {
         result = { 
           status: 'error', 
           message: `Unknown action: ${action}`,
-          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect', 'cleanup-match']
+          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect']
         };
     }
     
@@ -272,7 +254,7 @@ function getMatch(matchId) {
   if (!matchId) return null;
   const match = matches.get(matchId);
   
-  // Check if match is expired (this check is now redundant since we clean on every request)
+  // Check if match is expired
   if (match && Date.now() - match.ts > TIMEOUTS.MATCH) {
     deleteMatch(matchId);
     console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
@@ -284,7 +266,7 @@ function getMatch(matchId) {
 
 function setMatch(matchId, matchData) {
   matches.set(matchId, matchData);
-  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2}) - expires in ${TIMEOUTS.MATCH/60000} minutes`);
+  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2})`);
 }
 
 function getUserMatch(userId) {
@@ -564,7 +546,7 @@ async function handleFindMatch(data, now) {
     const matchInfo = createLightweightMatch(peer1, peer2, now);
     
     // DEBUG: Log match creation details
-    console.log(`[MATCH_CREATE] Creating match ${matchId} - will expire in ${TIMEOUTS.MATCH/60000} minutes`);
+    console.log(`[MATCH_CREATE] Creating match ${matchId}`);
     console.log(`[MATCH_CREATE] Peer1: ${peer1}, Peer2: ${peer2}`);
     console.log(`[MATCH_CREATE] Initiator: ${deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id}`);
     console.log(`[MATCH_CREATE] Match timeouts:`, matchInfo.to);
@@ -633,7 +615,7 @@ async function handleExchangeSignals(data, now) {
   const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
   let signalsAdded = 0;
   
-  // Enhanced signal parsing with better error handling
+  // ✅ FIXED: Enhanced signal storage - store in partner's queue so they can receive it
   if (data.offer) {
     try {
       // Handle both string and object offer
@@ -643,6 +625,7 @@ async function handleExchangeSignals(data, now) {
       }
       
       if (now < match.timeouts.offer) {
+        // ✅ FIXED: Store offer in PARTNER's queue so they receive it
         match.signaling[partnerId].offers.push({
           f: data.userId,
           d: offer,
@@ -650,7 +633,7 @@ async function handleExchangeSignals(data, now) {
           id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
         });
         signalsAdded++;
-        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
+        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}'s queue`);
       } else {
         console.log(`[SIGNALS] Offer timeout expired for ${data.userId}`);
       }
@@ -668,6 +651,7 @@ async function handleExchangeSignals(data, now) {
       }
       
       if (now < match.timeouts.answer) {
+        // ✅ FIXED: Store answer in PARTNER's queue so they receive it
         match.signaling[partnerId].answers.push({
           f: data.userId,
           d: answer,
@@ -675,7 +659,7 @@ async function handleExchangeSignals(data, now) {
           id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
         });
         signalsAdded++;
-        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
+        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}'s queue`);
       } else {
         console.log(`[SIGNALS] Answer timeout expired for ${data.userId}`);
       }
@@ -698,6 +682,7 @@ async function handleExchangeSignals(data, now) {
         const candidatesToAdd = ice.slice(0, availableSlots);
         
         candidatesToAdd.forEach(candidate => {
+          // ✅ FIXED: Store ICE in PARTNER's queue so they receive it
           match.signaling[partnerId].ice.push({
             f: data.userId,
             d: candidate,
@@ -708,7 +693,7 @@ async function handleExchangeSignals(data, now) {
         });
         
         if (candidatesToAdd.length > 0) {
-          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
+          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId} to ${partnerId}'s queue`);
         }
       } else {
         console.log(`[SIGNALS] ICE timeout expired or invalid format for ${data.userId}`);
@@ -727,7 +712,7 @@ async function handleExchangeSignals(data, now) {
       id: `r_${now}_${Math.random().toString(36).substr(2, 4)}`
     });
     match.status = 'connected';
-    console.log(`[SIGNALS] Connection ready from ${data.userId}`);
+    console.log(`[SIGNALS] Connection ready from ${data.userId} to ${partnerId}'s queue`);
     signalsAdded++;
   }
   
@@ -738,17 +723,27 @@ async function handleExchangeSignals(data, now) {
       ts: now,
       id: `p_${now}_${Math.random().toString(36).substr(2, 4)}`
     });
-    console.log(`[SIGNALS] Ping from ${data.userId}`);
+    console.log(`[SIGNALS] Ping from ${data.userId} to ${partnerId}'s queue`);
     signalsAdded++;
   }
   
-  // Process acknowledgments
+  // ✅ FIXED: Process acknowledgments - remove from current user's queue AND save match
   if (data.acknowledgeIds) {
     try {
-      const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
+      let ackIds = data.acknowledgeIds;
+      if (typeof ackIds === 'string') {
+        ackIds = JSON.parse(decodeURIComponent(ackIds));
+      }
+      
       if (Array.isArray(ackIds) && ackIds.length > 0) {
         const signals = match.signaling[data.userId];
         let ackedCount = 0;
+        
+        // Remove acknowledged signals
+        const beforeOffers = signals.offers.length;
+        const beforeAnswers = signals.answers.length;
+        const beforeIce = signals.ice.length;
+        const beforeAcks = signals.acks.length;
         
         signals.offers = signals.offers.filter(s => {
           if (ackIds.includes(s.id)) {
@@ -783,7 +778,11 @@ async function handleExchangeSignals(data, now) {
         });
         
         if (ackedCount > 0) {
-          console.log(`[SIGNALS] Acknowledged ${ackedCount} signals for ${data.userId}`);
+          console.log(`[SIGNALS] Acknowledged and removed ${ackedCount} signals for ${data.userId}`);
+          console.log(`[SIGNALS] Signal counts after ack - offers: ${beforeOffers}->${signals.offers.length}, answers: ${beforeAnswers}->${signals.answers.length}, ice: ${beforeIce}->${signals.ice.length}, acks: ${beforeAcks}->${signals.acks.length}`);
+          
+          // ✅ CRITICAL: Save match with updated signals after acknowledgment
+          setMatch(data.matchId, compressMatch(match));
         }
       }
     } catch (e) {
@@ -791,10 +790,10 @@ async function handleExchangeSignals(data, now) {
     }
   }
   
-  // Save updated match
+  // ✅ FIXED: Save updated match with new signals (moved before acknowledgment processing)
   setMatch(data.matchId, compressMatch(match));
   
-  // Prepare response with pending signals
+  // ✅ FIXED: Return signals from CURRENT USER's queue (signals sent TO them)
   const mySignals = match.signaling[data.userId];
   const pendingSignals = {
     offers: mySignals.offers.map(s => ({
@@ -833,6 +832,7 @@ async function handleExchangeSignals(data, now) {
   const totalPending = allSignalIds.length;
   if (totalPending > 0) {
     console.log(`[SIGNALS] Returning ${totalPending} pending signals to ${data.userId}`);
+    console.log(`[SIGNALS] Signal types: offers=${pendingSignals.offers.length}, answers=${pendingSignals.answers.length}, ice=${pendingSignals.ice.length}, acks=${pendingSignals.acks.length}`);
   }
   
   return {
