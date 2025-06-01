@@ -340,9 +340,9 @@ function createLightweightMatch(peer1, peer2, now) {
     ts: now,
     st: 'signaling',
     to: {
-      o: now + 20000, // Slightly longer timeouts
-      a: now + 20000,
-      c: now + 90000
+      o: now + 30000, // Longer offer timeout
+      a: now + 30000, // Longer answer timeout  
+      c: now + 120000 // Longer connection timeout
     },
     s: {
       [peer1]: { o: [], a: [], i: [], k: [] },
@@ -560,11 +560,16 @@ async function handleFindMatch(data, now) {
 
 async function handleExchangeSignals(data, now) {
   if (!data.matchId) {
+    console.log('[EXCHANGE] Missing matchId');
     return { status: 'error', message: 'Missing matchId parameter' };
   }
   
+  console.log('[EXCHANGE] Processing signals for match:', data.matchId, 'user:', data.userId);
+  console.log('[EXCHANGE] Data keys:', Object.keys(data));
+  
   const validation = await validateMatch(data.matchId, data.userId);
   if (!validation.valid) {
+    console.log('[EXCHANGE] Validation failed:', validation.error);
     return { status: 'error', message: validation.error };
   }
   
@@ -577,7 +582,12 @@ async function handleExchangeSignals(data, now) {
   // Enhanced signal parsing with better error handling
   if (data.offer) {
     try {
-      const offer = JSON.parse(decodeURIComponent(data.offer));
+      // Handle both string and object offer
+      let offer = data.offer;
+      if (typeof offer === 'string') {
+        offer = JSON.parse(decodeURIComponent(offer));
+      }
+      
       if (now < match.timeouts.offer) {
         match.signaling[partnerId].offers.push({
           f: data.userId,
@@ -587,15 +597,22 @@ async function handleExchangeSignals(data, now) {
         });
         signalsAdded++;
         console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
+      } else {
+        console.log(`[SIGNALS] Offer timeout expired for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse offer:', e.message);
+      console.error('[SIGNALS] Failed to parse offer:', e.message, 'Data:', data.offer);
     }
   }
   
   if (data.answer) {
     try {
-      const answer = JSON.parse(decodeURIComponent(data.answer));
+      // Handle both string and object answer
+      let answer = data.answer;
+      if (typeof answer === 'string') {
+        answer = JSON.parse(decodeURIComponent(answer));
+      }
+      
       if (now < match.timeouts.answer) {
         match.signaling[partnerId].answers.push({
           f: data.userId,
@@ -605,18 +622,25 @@ async function handleExchangeSignals(data, now) {
         });
         signalsAdded++;
         console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
+      } else {
+        console.log(`[SIGNALS] Answer timeout expired for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse answer:', e.message);
+      console.error('[SIGNALS] Failed to parse answer:', e.message, 'Data:', data.answer);
     }
   }
   
   if (data.ice) {
     try {
-      const ice = JSON.parse(decodeURIComponent(data.ice));
+      // Handle both string and array ice
+      let ice = data.ice;
+      if (typeof ice === 'string') {
+        ice = JSON.parse(decodeURIComponent(ice));
+      }
+      
       if (Array.isArray(ice) && now < match.timeouts.connection) {
         const currentIce = match.signaling[partnerId].ice.length;
-        const availableSlots = Math.max(0, 10 - currentIce);
+        const availableSlots = Math.max(0, 15 - currentIce); // Increased limit
         const candidatesToAdd = ice.slice(0, availableSlots);
         
         candidatesToAdd.forEach(candidate => {
@@ -632,9 +656,11 @@ async function handleExchangeSignals(data, now) {
         if (candidatesToAdd.length > 0) {
           console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
         }
+      } else {
+        console.log(`[SIGNALS] ICE timeout expired or invalid format for ${data.userId}`);
       }
     } catch (e) {
-      console.error('[SIGNALS] Failed to parse ICE candidates:', e.message);
+      console.error('[SIGNALS] Failed to parse ICE candidates:', e.message, 'Data:', data.ice);
     }
   }
   
