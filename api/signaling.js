@@ -191,19 +191,20 @@ export default async function handler(req, res) {
       case 'disconnect':
         result = await handleDisconnect({ userId, ...params });
         break;
-		case 'cleanup-match':
-		  const matchId = data.matchId;
-		  const reason = data.reason || 'unknown';
-		  
-		  console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
-		  
-		  const deleted = deleteMatch(matchId);
-		  return {
-			status: 'success',
-			message: deleted ? 'Match deleted' : 'Match already deleted',
-			cleaned: deleted,
-			reason: reason
-		  };
+	case 'cleanup-match':
+	  const matchId = params.matchId;  // ✅ FIXED: Use 'params' not 'data'
+	  const reason = params.reason || 'unknown';  // ✅ FIXED
+	  
+	  console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
+	  
+	  const deleted = deleteMatch(matchId);
+	  result = {  // ✅ FIXED: Assign to 'result' variable
+		status: 'success',
+		message: deleted ? 'Match deleted' : 'Match already deleted',
+		cleaned: deleted,
+		reason: reason
+	  };
+	  break;
       default:
         result = { 
           status: 'error', 
