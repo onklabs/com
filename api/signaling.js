@@ -102,8 +102,19 @@ export default async function handler(req, res) {
       }
     }
     
+    console.log('[DEBUG] Parsed request data:', JSON.stringify(requestData, null, 2));
+    
     const { action, userId, ...params } = requestData;
     const now = Date.now();
+    
+    // Enhanced validation logging
+    if (!action) {
+      console.log('[DEBUG] No action provided, returning health check');
+    } else if (!userId) {
+      console.log('[DEBUG] Missing userId for action:', action);
+    } else if (typeof userId !== 'string' || userId.length < 3) {
+      console.log('[DEBUG] Invalid userId format:', userId, typeof userId);
+    }
     
     // Enhanced health check with detailed stats
     if (!action) {
@@ -127,10 +138,21 @@ export default async function handler(req, res) {
     
     // Validate userId
     if (!userId || typeof userId !== 'string' || userId.length < 3) {
+      console.log('[ERROR] Invalid userId validation failed:', {
+        userId: userId,
+        type: typeof userId,
+        length: userId ? userId.length : 0
+      });
+      
       return res.status(400).json({ 
         status: 'error', 
         message: 'Invalid or missing userId parameter',
-        expected_format: 'string with minimum 3 characters'
+        expected_format: 'string with minimum 3 characters',
+        received: {
+          userId: userId,
+          type: typeof userId,
+          length: userId ? userId.length : 0
+        }
       });
     }
 
@@ -165,11 +187,21 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('[ERROR] Server error:', error.message);
     console.error('[ERROR] Stack:', error.stack);
+    console.error('[ERROR] Request method:', req.method);
+    console.error('[ERROR] Request query:', req.query);
+    console.error('[ERROR] Request body:', req.body);
     
     return res.status(500).json({ 
       status: 'error', 
       message: 'Internal server error',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      debug_info: {
+        method: req.method,
+        has_query: !!req.query,
+        has_body: !!req.body,
+        query_keys: req.query ? Object.keys(req.query) : [],
+        body_keys: req.body ? Object.keys(req.body) : []
+      },
       timestamp: Date.now()
     });
   }
