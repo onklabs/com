@@ -371,8 +371,18 @@ function setWaitingQueue(queue) {
 }
 
 function deterministic_initiator(peer1, peer2) {
-  return peer1.localeCompare(peer2) < 0;
-}
+  // OLD:
+  // return peer1.localeCompare(peer2) < 0;
+  
+  // NEW - Option 2: Hash-based (recommended)
+  const combined = [peer1, peer2].sort().join('');
+  let hash = 0;
+  
+  for (let i = 0; i < combined.length; i++) {
+    const char = combined.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
 
 function createLightweightMatch(peer1, peer2, now) {
   return {
