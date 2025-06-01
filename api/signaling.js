@@ -9,11 +9,11 @@ let heartbeats = new Map();
 let cleanupIntervals = new Map();
 
 const TIMEOUTS = {
-  WAITING: 30000,
-  MATCH: 300000,
-  HEARTBEAT: 60000,
-  SIGNAL: 30000,
-  CLEANUP_INTERVAL: 60000 // Clean up every minute
+  WAITING: 60000,        // 1 minute in queue
+  MATCH: 600000,         // 10 minutes match lifetime  
+  HEARTBEAT: 120000,     // 2 minutes heartbeat
+  SIGNAL: 60000,         // 1 minute for signals
+  CLEANUP_INTERVAL: 120000 // Clean up every 2 minutes
 };
 
 // Enhanced cleanup system
@@ -340,9 +340,9 @@ function createLightweightMatch(peer1, peer2, now) {
     ts: now,
     st: 'signaling',
     to: {
-      o: now + 45000, // Even longer offer timeout
-      a: now + 45000, // Even longer answer timeout  
-      c: now + 180000 // 3 minutes connection timeout
+      o: now + 60000,  // 1 minute for offer
+      a: now + 60000,  // 1 minute for answer  
+      c: now + 300000  // 5 minutes for connection
     },
     s: {
       [peer1]: { o: [], a: [], i: [], k: [] },
@@ -484,12 +484,12 @@ async function handleFindMatch(data, now) {
       const expanded = expandMatch(existingMatch);
       const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
       
-      // Reset match status to allow reconnection
+      // Reset match status to allow reconnection with longer timeouts
       existingMatch.st = 'signaling';
       existingMatch.to = {
-        o: now + 30000,
-        a: now + 30000, 
-        c: now + 120000
+        o: now + 60000,   // 1 minute
+        a: now + 60000,   // 1 minute
+        c: now + 300000   // 5 minutes
       };
       
       setMatch(existingMatchId, existingMatch);
