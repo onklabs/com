@@ -340,9 +340,9 @@ function createLightweightMatch(peer1, peer2, now) {
     ts: now,
     st: 'signaling',
     to: {
-      o: now + 35000,  // 35s for offer (compromise)
-      a: now + 35000,  // 35s for answer (compromise)
-      c: now + 120000  // 2 minutes for connection
+      o: now + 60000,  // 1 minute for offer
+      a: now + 60000,  // 1 minute for answer  
+      c: now + 300000  // 5 minutes for connection
     },
     s: {
       [peer1]: { o: [], a: [], i: [], k: [] },
@@ -493,7 +493,7 @@ async function handleFindMatch(data, now) {
       const expanded = expandMatch(existingMatch);
       const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
       
-      // Reset match status to allow reconnection (moderate timeouts)
+      // Reset match status to allow reconnection with longer timeouts
       existingMatch.st = 'signaling';
       existingMatch.to = {
         o: now + 35000,
