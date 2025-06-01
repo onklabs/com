@@ -1,900 +1,777 @@
-<script>
-    // Enhanced WebRTC Chat with GET API + Optimizations
-    if (!window.RTCPeerConnection) {
-      alert('Your browser does not support WebRTC. Please use the latest Chrome, Firefox, Safari, or Edge.');
-    }
+// Optimized signaling server without Redis - using enhanced in-memory storage
+// WARNING: Data will be lost on server restart
 
-    // Global variables with enhanced management
-    let localConnection, dataChannel, isConnected = false, isInitiator = false;
-    let currentMatch = null, myUserId = generateUserId(), partnerInfo = null;
-    
-    // Enhanced retry and connection management
-    let retryAttempts = 0, signalingInterval = null, heartbeatInterval = null;
-    const maxRetryAttempts = 3, baseRetryDelay = 10000, maxIceCandidates = 10;
-    let retryTimeoutId = null, isRetrying = false, isConnecting = false;
-    let connectionStartTime = null;
-    
-    // ICE candidates management for low-end devices
-    let iceCandidatesQueue = [], signalingUrl = 'https://comjp.vercel.app/api/signaling';
-    let pendingSignalIds = [], connectionTimeout = null, offerTimeout = null, answerTimeout = null;
-    let connectionState = 'disconnected', lastPingTime = 0, batchedSignals = {};
-    let signalingActive = false, adaptivePollingDelay = 5000, greetingSent = false;
-    let batchTimeout = null, iceGatheringComplete = false;
-    
-    // Notifications
-    let notificationsEnabled = false, notificationPermission = 'default';
-    let lastNotificationTime = 0;
+// Enhanced in-memory storage with automatic cleanup
+let waitingQueue = [];
+let matches = new Map();
+let userMatches = new Map();
+let heartbeats = new Map();
+let cleanupIntervals = new Map();
 
-    // Performance monitoring
-    let performanceMetrics = {
-      connectionStartTime: null,
-      matchFoundTime: null,
-      webrtcConnectedTime: null,
-      messagesSent: 0,
-      messagesReceived: 0
-    };
+const TIMEOUTS = {
+  WAITING: 30000,
+  MATCH: 300000,
+  HEARTBEAT: 60000,
+  SIGNAL: 30000,
+  CLEANUP_INTERVAL: 60000 // Clean up every minute
+};
 
-    // DOM elements
-    const statusEl = document.getElementById('status');
-    const statusIndicator = document.querySelector('.status-indicator');
-    const statusText = document.querySelector('.status-text');
-    const nameInput = document.getElementById('name');
-    const genderSelect = document.getElementById('gender');
-    const statusTextInput = document.getElementById('status-text');
-    const avatarDiv = document.getElementById('avatar');
-    const messagesEl = document.getElementById('messages');
-    const messageInput = document.getElementById('message');
-    const sendBtn = document.getElementById('send');
-    const disconnectBtn = document.getElementById('disconnect-btn');
-    const notificationBtn = document.getElementById('notification-btn');
-    const imageInput = document.getElementById('image-file');
-    const avatarFileInput = document.getElementById('avatar-file');
-    const avatarUrlInput = document.getElementById('avatar-url');
-
-    function initApp() {
-      console.log('[INIT] Starting Enhanced WebRTC chat application');
-      performanceMetrics.connectionStartTime = Date.now();
-      
-      initializeNotifications();
-      
-      let userName = sessionStorage.getItem('name');
-      if (!userName) {
-        userName = `User_${myUserId.slice(-4)}`;
-        sessionStorage.setItem('name', userName);
-      }
-      if (nameInput) nameInput.value = userName;
-
-      const gender = sessionStorage.getItem('gender') || 'Unspecified';
-      if (genderSelect) genderSelect.value = gender;
-
-      const userStatus = sessionStorage.getItem('status') || '';
-      if (statusTextInput) statusTextInput.value = userStatus;
-
-      const avatar = sessionStorage.getItem('avatar');
-      if (avatar) {
-        setAvatar(avatar);
-      }
-
-      setupEventListeners();
-      startMatchFinding();
-      startHeartbeat();
-      
-      // Performance mark
-      if (window.performance && window.performance.mark) {
-        window.performance.mark('webrtc-app-start');
-      }
-    }
-
-    async function initializeNotifications() {
-      const savedPref = localStorage.getItem('notificationsEnabled');
-      notificationsEnabled = savedPref === 'true';
-      
-      if ('Notification' in window) {
-        notificationPermission = Notification.permission;
-        
-        if (notificationPermission === 'default' && notificationsEnabled) {
-          try {
-            notificationPermission = await Notification.requestPermission();
-          } catch (error) {
-            console.error('Notification permission error:', error);
-            notificationPermission = 'denied';
-          }
-        }
-        
-        notificationsEnabled = notificationsEnabled && notificationPermission === 'granted';
-      } else {
-        notificationsEnabled = false;
-      }
-      
-      updateNotificationButtonState();
-    }
-
-    function updateNotificationButtonState() {
-      if (notificationBtn) {
-        if (notificationsEnabled) {
-          notificationBtn.classList.remove('disabled');
-          notificationBtn.setAttribute('data-tooltip', 'Notifications enabled');
-        } else {
-          notificationBtn.classList.add('disabled');
-          notificationBtn.setAttribute('data-tooltip', 'Notifications disabled');
-        }
-        
-        if (isConnected) {
-          notificationBtn.style.display = 'block';
-        }
-      }
-    }
-
-    async function toggleNotifications() {
-      if ('Notification' in window) {
-        if (notificationPermission === 'denied') {
-          alert('Notifications are blocked. Please enable them in your browser settings.');
-          return;
-        }
-        
-        if (notificationPermission === 'default') {
-          try {
-            notificationPermission = await Notification.requestPermission();
-          } catch (error) {
-            alert('Could not request notification permission.');
-            return;
-          }
-        }
-        
-        if (notificationPermission === 'granted') {
-          notificationsEnabled = !notificationsEnabled;
-          localStorage.setItem('notificationsEnabled', notificationsEnabled.toString());
-        }
-      } else {
-        alert('Notifications are not supported in this browser.');
-        return;
-      }
-      
-      updateNotificationButtonState();
-      
-      if (notificationsEnabled) {
-        showNotification('Notifications enabled', 'You will receive notifications for new messages and events.', 'system');
-      }
-    }
-
-    function shouldShowNotification() {
-      if (!notificationsEnabled) return false;
-      if (!dataChannel || dataChannel.readyState !== 'open') return false;
-      
+// Enhanced cleanup system
+function startPeriodicCleanup() {
+  if (!cleanupIntervals.has('main')) {
+    const interval = setInterval(() => {
       const now = Date.now();
-      if (now - lastNotificationTime < 3000) return false;
       
-      if (typeof document.hasFocus === 'function' && document.hasFocus()) return false;
-      if (typeof document.hidden !== 'undefined' && !document.hidden) return false;
-      
-      return true;
-    }
-
-    function showNotification(title, body, type = 'message', data = {}) {
-      if (!shouldShowNotification() && type !== 'system') return;
-      
-      const now = Date.now();
-      lastNotificationTime = now;
-      
-      if ('Notification' in window && notificationPermission === 'granted') {
-        try {
-          const notification = new Notification(title, {
-            body: body,
-            tag: type,
-            requireInteraction: type === 'connection',
-            silent: type === 'system',
-            timestamp: now,
-            icon: '/favicon.ico'
-          });
-          
-          notification.onclick = () => {
-            window.focus();
-            notification.close();
-            if (messageInput) messageInput.focus();
-          };
-          
-          setTimeout(() => {
-            notification.close();
-          }, type === 'connection' ? 10000 : 5000);
-          
-        } catch (error) {
-          console.error('Web notification error:', error);
+      // Clean expired heartbeats
+      for (const [userId, timestamp] of heartbeats.entries()) {
+        if (now - timestamp > TIMEOUTS.HEARTBEAT) {
+          heartbeats.delete(userId);
+          console.log(`[CLEANUP] Removed expired heartbeat for ${userId}`);
         }
       }
-    }
-
-    function generateUserId() {
-      return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-    }
-
-    function generateGreeting(partnerInfo) {
-      const greetings = [
-        `Hi there! I'm ${partnerInfo.name}`,
-        `Hello! Nice to meet you, I'm ${partnerInfo.name}`,
-        `Hey! ${partnerInfo.name} here`,
-        `Hi! I'm ${partnerInfo.name}, nice to connect!`,
-        `Hello there! ${partnerInfo.name} is my name`
-      ];
       
-      let greeting = greetings[Math.floor(Math.random() * greetings.length)];
-      
-      if (partnerInfo.gender && partnerInfo.gender !== 'Unspecified') {
-        greeting += ` (${partnerInfo.gender})`;
-      }
-      
-      if (partnerInfo.status && partnerInfo.status.trim()) {
-        greeting += `. ${partnerInfo.status}`;
-      }
-      
-      return greeting;
-    }
-
-    // Enhanced GET API call with improved error handling
- async function apiCall(data) {
-  try {
-    const params = new URLSearchParams();
-    params.append('userId', myUserId);
-    
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined && value !== null) {
-        if (typeof value === 'object') {
-          params.append(key, encodeURIComponent(JSON.stringify(value)));
-        } else if (typeof value === 'boolean') {
-          params.append(key, value.toString());
-        } else {
-          params.append(key, value);
+      // Clean expired matches
+      for (const [matchId, match] of matches.entries()) {
+        if (now - match.ts > TIMEOUTS.MATCH) {
+          matches.delete(matchId);
+          userMatches.delete(match.p1);
+          userMatches.delete(match.p2);
+          console.log(`[CLEANUP] Removed expired match ${matchId}`);
         }
       }
-    }
+      
+      // Clean waiting queue
+      const beforeCount = waitingQueue.length;
+      waitingQueue = waitingQueue.filter(p => now - p.ts < TIMEOUTS.WAITING);
+      if (waitingQueue.length !== beforeCount) {
+        console.log(`[CLEANUP] Cleaned waiting queue: ${beforeCount} -> ${waitingQueue.length}`);
+      }
+      
+    }, TIMEOUTS.CLEANUP_INTERVAL);
     
-    const url = `${signalingUrl}?${params.toString()}`;
-    
-    // Bỏ headers hoàn toàn
-    const response = await fetch(url, {
-      method: 'GET'
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    return await response.json();
-    
-  } catch (error) {
-    throw new Error(`API call failed: ${error.message}`);
+    cleanupIntervals.set('main', interval);
+    console.log('[CLEANUP] Periodic cleanup started');
   }
 }
-    async function startMatchFinding() {
-      // Prevent multiple simultaneous connection attempts
-      if (isConnecting) {
-        console.log('[CONNECT] Connection attempt already in progress');
-        return;
-      }
 
-      // Check if we've exceeded retry attempts
-      if (retryAttempts >= maxRetryAttempts) {
-        console.error('[CONNECT] Maximum retry attempts exceeded');
-        updateStatus('Connection failed. Please refresh the page.', 'error');
-        addSystemMessage('Unable to connect to server. Please refresh the page to try again.');
-        return;
-      }
+// Start cleanup when module loads
+startPeriodicCleanup();
 
-      if (currentMatch) {
-        return;
-      }
-
-      try {
-        isConnecting = true;
-        connectionStartTime = Date.now();
-        
-        const isRetryAttempt = retryAttempts > 0;
-        const statusMessage = isRetryAttempt ? 
-          `Reconnecting... (${retryAttempts}/${maxRetryAttempts})` : 
-          'Looking for someone to chat with...';
-        
-        updateStatus(statusMessage, 'searching');
-        console.log(`[CONNECT] Attempt ${retryAttempts + 1}/${maxRetryAttempts + 1}`);
-        
-        const result = await apiCall({
-          action: 'find-match',
-          timezone: getTimezoneOffset()
-        });
-
-        if (result.status === 'matched') {
-          // Reset retry state on successful match
-          retryAttempts = 0;
-          isConnecting = false;
-          isRetrying = false;
-          
-          // Clear any pending retry timeouts
-          if (retryTimeoutId) {
-            clearTimeout(retryTimeoutId);
-            retryTimeoutId = null;
-          }
-          
-          performanceMetrics.matchFoundTime = Date.now();
-          const matchTime = performanceMetrics.matchFoundTime - connectionStartTime;
-          console.log(`[MATCH] Found match in ${matchTime}ms`);
-          
-          currentMatch = {
-            matchId: result.matchId,
-            partnerId: result.partnerId,
-            isInitiator: result.isInitiator,
-            existing: result.existing
-          };
-          
-          updateStatus('Found someone! Connecting...', 'signaling');
-          addSystemMessage(`Matched with someone! Setting up connection...`);
-          
-          await createPeerConnection();
-          startSignalingLoop();
-          signalingActive = true;
-          greetingSent = false;
-          
-          if (result.isInitiator && !result.existing) {
-            setupOfferTimeout();
-            setTimeout(() => createOffer(), 1000);
-          } else {
-            setupAnswerTimeout();
-          }
-
-          setupConnectionTimeout();
-          
-        } else if (result.status === 'waiting') {
-          isConnecting = false;
-          updateStatus(`Waiting for match... (${result.position} in queue)`, 'searching');
-          setTimeout(() => startMatchFinding(), 5000);
-        } else {
-          throw new Error(result.message || 'Unknown error');
-        }
-        
-      } catch (error) {
-        console.error('[CONNECT] Connection error:', error);
-        isConnecting = false;
-        
-        if (!isRetrying) {
-          scheduleRetry();
-        }
-      }
-    }
-
-    // Schedule retry with exponential backoff (from reference code)
-    function scheduleRetry() {
-      if (isRetrying || retryAttempts >= maxRetryAttempts) {
-        return;
-      }
-
-      isRetrying = true;
-      retryAttempts++;
+export default async function handler(req, res) {
+  console.log('=== Enhanced Signaling API Called ===');
+  console.log('Method:', req.method);
+  console.log('Query keys:', Object.keys(req.query));
+  
+  // Enhanced CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods','POST', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  if (req.method !== 'GET') {
+    return res.status(405).json({ 
+      status: 'error', 
+      message: 'Only GET method allowed',
+      allowed_methods: ['GET', 'OPTIONS']
+    });
+  }
+  
+  try {
+    const { action, userId, ...params } = req.query;
+    const now = Date.now();
+    
+    // Enhanced health check with detailed stats
+    if (!action) {
+      const stats = {
+        waiting: waitingQueue.length,
+        active_matches: matches.size,
+        active_users: heartbeats.size,
+        server_uptime: process.uptime ? Math.floor(process.uptime()) : 'unknown',
+        memory_usage: process.memoryUsage ? process.memoryUsage() : 'unknown'
+      };
       
-      // Calculate exponential backoff delay: 10s, 20s, 40s
-      const delay = baseRetryDelay * Math.pow(2, retryAttempts - 1);
-      
-      console.log(`[RETRY] Scheduling retry ${retryAttempts}/${maxRetryAttempts} in ${delay}ms`);
-      updateStatus(`Connection failed. Retrying in ${Math.round(delay/1000)}s... (${retryAttempts}/${maxRetryAttempts})`, 'error');
-      
-      retryTimeoutId = setTimeout(() => {
-        if (retryAttempts <= maxRetryAttempts) {
-          console.log(`[RETRY] Executing retry attempt ${retryAttempts}`);
-          isRetrying = false;
-          startMatchFinding();
-        }
-      }, delay);
-    }
-
-    function setupOfferTimeout() {
-      if (offerTimeout) clearTimeout(offerTimeout);
-      offerTimeout = setTimeout(() => {
-        if (connectionState !== 'connected' && currentMatch) {
-          addSystemMessage('Offer timeout. Trying to reconnect...');
-          handleConnectionFailure();
-        }
-      }, 20000);
-    }
-
-    function setupAnswerTimeout() {
-      if (answerTimeout) clearTimeout(answerTimeout);
-      answerTimeout = setTimeout(() => {
-        if (connectionState !== 'connected' && currentMatch) {
-          addSystemMessage('Answer timeout. Trying to reconnect...');
-          handleConnectionFailure();
-        }
-      }, 20000);
-    }
-
-    function setupConnectionTimeout() {
-      if (connectionTimeout) clearTimeout(connectionTimeout);
-      connectionTimeout = setTimeout(() => {
-        if (connectionState !== 'connected' && currentMatch) {
-          addSystemMessage('Connection timeout. Finding new partner...');
-          handleConnectionFailure();
-        }
-      }, 75000);
-    }
-
-    function clearAllTimeouts() {
-      const timeouts = [connectionTimeout, offerTimeout, answerTimeout, batchTimeout, retryTimeoutId];
-      timeouts.forEach(timeout => {
-        if (timeout) {
-          clearTimeout(timeout);
-        }
+      return res.status(200).json({
+        service: 'Enhanced WebRTC Signaling',
+        status: 'online',
+        timestamp: now,
+        stats: stats,
+        version: '2.0.0'
       });
+    }
+    
+    // Validate userId
+    if (!userId || typeof userId !== 'string' || userId.length < 3) {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Invalid or missing userId parameter',
+        expected_format: 'string with minimum 3 characters'
+      });
+    }
+
+    console.log(`[${action?.toUpperCase()}] Processing for user: ${userId}`);
+    updateHeartbeat(userId, now);
+
+    let result;
+    switch (action) {
+      case 'find-match':
+        result = await handleFindMatch({ userId, ...params }, now);
+        break;
+      case 'exchange-signals':
+        result = await handleExchangeSignals({ userId, ...params }, now);
+        break;
+      case 'heartbeat':
+        result = await handleHeartbeat({ userId, ...params }, now);
+        break;
+      case 'disconnect':
+        result = await handleDisconnect({ userId, ...params });
+        break;
+      default:
+        result = { 
+          status: 'error', 
+          message: `Unknown action: ${action}`,
+          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect']
+        };
+    }
+    
+    console.log(`[${action?.toUpperCase()}] Result: ${result.status}`);
+    return res.status(result.status === 'error' ? 400 : 200).json(result);
+    
+  } catch (error) {
+    console.error('[ERROR] Server error:', error.message);
+    console.error('[ERROR] Stack:', error.stack);
+    
+    return res.status(500).json({ 
+      status: 'error', 
+      message: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: Date.now()
+    });
+  }
+}
+
+// Enhanced helper functions with better error handling and logging
+
+function updateHeartbeat(userId, timestamp) {
+  const previous = heartbeats.get(userId);
+  heartbeats.set(userId, timestamp);
+  
+  if (!previous) {
+    console.log(`[HEARTBEAT] New user: ${userId}`);
+  }
+  
+  // Self-cleanup after timeout (backup to periodic cleanup)
+  setTimeout(() => {
+    const current = heartbeats.get(userId);
+    if (current === timestamp) {
+      heartbeats.delete(userId);
+      console.log(`[HEARTBEAT] Auto-cleaned expired heartbeat for ${userId}`);
+    }
+  }, TIMEOUTS.HEARTBEAT);
+}
+
+function getMatch(matchId) {
+  if (!matchId) return null;
+  const match = matches.get(matchId);
+  
+  // Check if match is expired
+  if (match && Date.now() - match.ts > TIMEOUTS.MATCH) {
+    deleteMatch(matchId);
+    console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
+    return null;
+  }
+  
+  return match;
+}
+
+function setMatch(matchId, matchData) {
+  matches.set(matchId, matchData);
+  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2})`);
+  
+  // Self-cleanup after timeout
+  setTimeout(() => {
+    const current = matches.get(matchId);
+    if (current === matchData) {
+      deleteMatch(matchId);
+      console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
+    }
+  }, TIMEOUTS.MATCH);
+}
+
+function getUserMatch(userId) {
+  const matchId = userMatches.get(userId);
+  if (!matchId) return null;
+  
+  // Verify match still exists
+  const match = getMatch(matchId);
+  if (!match) {
+    deleteUserMatch(userId);
+    return null;
+  }
+  
+  return matchId;
+}
+
+function setUserMatch(userId, matchId) {
+  userMatches.set(userId, matchId);
+  console.log(`[USER_MATCH] Set ${userId} -> ${matchId}`);
+  
+  // Self-cleanup after timeout
+  setTimeout(() => {
+    const current = userMatches.get(userId);
+    if (current === matchId) {
+      userMatches.delete(userId);
+      console.log(`[USER_MATCH] Auto-cleaned ${userId} -> ${matchId}`);
+    }
+  }, TIMEOUTS.MATCH);
+}
+
+function deleteUserMatch(userId) {
+  const removed = userMatches.delete(userId);
+  if (removed) {
+    console.log(`[USER_MATCH] Deleted mapping for ${userId}`);
+  }
+  return removed;
+}
+
+function deleteMatch(matchId) {
+  const match = matches.get(matchId);
+  if (match) {
+    matches.delete(matchId);
+    // Also clean up user mappings
+    deleteUserMatch(match.p1);
+    deleteUserMatch(match.p2);
+    console.log(`[MATCH] Deleted match: ${matchId}`);
+    return true;
+  }
+  return false;
+}
+
+function getWaitingQueue() {
+  // Enhanced cleanup with logging
+  const now = Date.now();
+  const beforeCount = waitingQueue.length;
+  waitingQueue = waitingQueue.filter(p => {
+    const isValid = now - p.ts < TIMEOUTS.WAITING;
+    if (!isValid) {
+      console.log(`[QUEUE] Removed expired user from queue: ${p.id}`);
+    }
+    return isValid;
+  });
+  
+  if (beforeCount !== waitingQueue.length) {
+    console.log(`[QUEUE] Cleaned queue: ${beforeCount} -> ${waitingQueue.length}`);
+  }
+  
+  return waitingQueue;
+}
+
+function setWaitingQueue(queue) {
+  const previous = waitingQueue.length;
+  waitingQueue = queue;
+  console.log(`[QUEUE] Updated queue size: ${previous} -> ${queue.length}`);
+}
+
+function deterministic_initiator(peer1, peer2) {
+  return peer1.localeCompare(peer2) < 0;
+}
+
+function createLightweightMatch(peer1, peer2, now) {
+  return {
+    p1: peer1,
+    p2: peer2,
+    ts: now,
+    st: 'signaling',
+    to: {
+      o: now + 20000, // Slightly longer timeouts
+      a: now + 20000,
+      c: now + 90000
+    },
+    s: {
+      [peer1]: { o: [], a: [], i: [], k: [] },
+      [peer2]: { o: [], a: [], i: [], k: [] }
+    }
+  };
+}
+
+function expandMatch(match) {
+  if (!match) return null;
+  
+  return {
+    id: match.id,
+    peer1: match.p1,
+    peer2: match.p2,
+    timestamp: match.ts,
+    status: match.st,
+    timeouts: {
+      offer: match.to.o,
+      answer: match.to.a,
+      connection: match.to.c
+    },
+    signaling: {
+      [match.p1]: {
+        offers: match.s[match.p1]?.o || [],
+        answers: match.s[match.p1]?.a || [],
+        ice: match.s[match.p1]?.i || [],
+        acks: match.s[match.p1]?.k || []
+      },
+      [match.p2]: {
+        offers: match.s[match.p2]?.o || [],
+        answers: match.s[match.p2]?.a || [],
+        ice: match.s[match.p2]?.i || [],
+        acks: match.s[match.p2]?.k || []
+      }
+    }
+  };
+}
+
+function compressMatch(match) {
+  if (!match) return null;
+  
+  return {
+    p1: match.peer1,
+    p2: match.peer2,
+    ts: match.timestamp,
+    st: match.status,
+    to: {
+      o: match.timeouts.offer,
+      a: match.timeouts.answer,
+      c: match.timeouts.connection
+    },
+    s: {
+      [match.peer1]: {
+        o: match.signaling[match.peer1]?.offers || [],
+        a: match.signaling[match.peer1]?.answers || [],
+        i: match.signaling[match.peer1]?.ice || [],
+        k: match.signaling[match.peer1]?.acks || []
+      },
+      [match.peer2]: {
+        o: match.signaling[match.peer2]?.offers || [],
+        a: match.signaling[match.peer2]?.answers || [],
+        i: match.signaling[match.peer2]?.ice || [],
+        k: match.signaling[match.peer2]?.acks || []
+      }
+    }
+  };
+}
+
+async function validateMatch(matchId, peerId) {
+  if (!matchId || !peerId) {
+    return { valid: false, error: 'Missing matchId or peerId' };
+  }
+  
+  const match = getMatch(matchId);
+  if (!match) {
+    console.log(`[VALIDATE] Match not found: ${matchId}`);
+    return { valid: false, error: 'Match not found' };
+  }
+  
+  if (match.p1 !== peerId && match.p2 !== peerId) {
+    console.log(`[VALIDATE] Unauthorized access to match ${matchId} by ${peerId}`);
+    return { valid: false, error: 'Unauthorized' };
+  }
+  
+  const now = Date.now();
+  if (now - match.ts > TIMEOUTS.MATCH) {
+    console.log(`[VALIDATE] Match expired: ${matchId}`);
+    deleteMatch(matchId);
+    return { valid: false, error: 'Match expired' };
+  }
+  
+  return { valid: true, match: expandMatch(match) };
+}
+
+async function cleanExpiredSignals(match, now) {
+  if (!match) return null;
+  
+  const cleaned = { ...match };
+  let totalCleaned = 0;
+  
+  for (const peerId of [match.peer1, match.peer2]) {
+    const signals = cleaned.signaling[peerId];
+    if (!signals) continue;
+    
+    const beforeOffers = signals.offers.length;
+    const beforeAnswers = signals.answers.length;
+    const beforeIce = signals.ice.length;
+    const beforeAcks = signals.acks.length;
+    
+    signals.offers = signals.offers.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
+    signals.answers = signals.answers.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
+    signals.ice = signals.ice.filter(s => now - s.ts < 20000);
+    signals.acks = signals.acks.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
+    
+    const cleaned_count = (beforeOffers - signals.offers.length) + 
+                         (beforeAnswers - signals.answers.length) + 
+                         (beforeIce - signals.ice.length) + 
+                         (beforeAcks - signals.acks.length);
+    
+    totalCleaned += cleaned_count;
+  }
+  
+  if (totalCleaned > 0) {
+    console.log(`[SIGNALS] Cleaned ${totalCleaned} expired signals from match`);
+  }
+  
+  return cleaned;
+}
+
+async function handleFindMatch(data, now) {
+  console.log(`[FIND_MATCH] Starting for user ${data.userId}`);
+  
+  // Check for existing match first
+  const existingMatchId = getUserMatch(data.userId);
+  if (existingMatchId) {
+    const existingMatch = getMatch(existingMatchId);
+    if (existingMatch) {
+      const expanded = expandMatch(existingMatch);
+      const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
+      console.log(`[FIND_MATCH] Found existing match: ${existingMatchId}`);
       
-      connectionTimeout = null;
-      offerTimeout = null;
-      answerTimeout = null;
-      batchTimeout = null;
-      retryTimeoutId = null;
-    }
-
-    // Optimized WebRTC peer connection for low-end devices
-    async function createPeerConnection() {
-      try {
-        console.log('[WEBRTC] Creating optimized peer connection');
-        
-        // Optimized configuration for low-end devices
-        const config = {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-          ],
-          iceTransportPolicy: 'all',
-          bundlePolicy: 'balanced',
-          iceCandidatePoolSize: 0 // Disable candidate pooling to save resources
-        };
-
-        localConnection = new RTCPeerConnection(config);
-
-        // Reset ICE management state
-        iceCandidatesQueue = [];
-        iceGatheringComplete = false;
-
-        // Handle ICE candidates with throttling for low-end devices
-        localConnection.onicecandidate = async (event) => {
-          if (event.candidate) {
-            // Limit ICE candidates to reduce CPU load
-            if (iceCandidatesQueue.length < maxIceCandidates) {
-              iceCandidatesQueue.push(event.candidate);
-              batchSignalsForSending();
-            } else {
-              console.log('[WEBRTC] ICE candidate queue full, dropping candidate');
-            }
-          } else if (event.candidate === null) {
-            console.log('[WEBRTC] ICE gathering complete');
-            iceGatheringComplete = true;
-          }
-        };
-
-        localConnection.onconnectionstatechange = () => {
-          console.log('[WEBRTC] Connection state:', localConnection.connectionState);
-          
-          switch (localConnection.connectionState) {
-            case 'connected':
-              connectionState = 'connected';
-              signalingActive = false;
-              clearAllTimeouts();
-              
-              performanceMetrics.webrtcConnectedTime = Date.now();
-              const totalTime = performanceMetrics.webrtcConnectedTime - performanceMetrics.connectionStartTime;
-              console.log(`[PERFORMANCE] Connected in ${totalTime}ms total`);
-              
-              updateStatus('Connected! Say hello 👋', 'connected');
-              addSystemMessage(`You're now connected with someone new!`);
-              stopSignalingLoop();
-              sendConnectionReady();
-              startPingLoop();
-              
-              showNotification(
-                'Chat Connected!', 
-                'You are now connected with someone. Start chatting!',
-                'connection'
-              );
-              break;
-            case 'disconnected':
-            case 'failed':
-            case 'closed':
-              if (isConnected) {
-                handlePartnerDisconnect();
-              }
-              break;
-          }
-        };
-
-        if (currentMatch.isInitiator) {
-          dataChannel = localConnection.createDataChannel('messages', {
-            ordered: true,
-            maxRetransmits: 3 // Limit retransmits for low-end devices
-          });
-          setupDataChannel(dataChannel);
-        }
-
-        localConnection.ondatachannel = (event) => {
-          dataChannel = event.channel;
-          setupDataChannel(dataChannel);
-        };
-
-      } catch (error) {
-        console.error('[WEBRTC] Error creating peer connection:', error);
-        updateStatus('Connection failed, trying again...', 'error');
-        handleConnectionFailure();
-      }
-    }
-
-    function setupDataChannel(channel) {
-      if (!channel) return;
-      
-      channel.onopen = () => {
-        console.log('[DATACHANNEL] Data channel opened');
-        isConnected = true;
-        sendUserInfo();
-        updateNotificationButtonState();
+      return {
+        status: 'matched',
+        matchId: existingMatchId,
+        partnerId: partnerId,
+        isInitiator: deterministic_initiator(data.userId, partnerId),
+        existing: true,
+        timestamp: now
       };
-
-      channel.onclose = () => {
-        console.log('[DATACHANNEL] Data channel closed');
-        if (isConnected) {
-          showNotification(
-            'Partner Disconnected', 
-            'Your chat partner has left the conversation.',
-            'connection'
-          );
-          handlePartnerDisconnect();
-        }
-      };
-
-      channel.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          performanceMetrics.messagesReceived++;
-          handleDataChannelMessage(data);
-        } catch (error) {
-          console.error('[DATACHANNEL] Error parsing message:', error, event.data);
-        }
-      };
-
-      channel.onerror = (error) => {
-        console.error('[DATACHANNEL] Error:', error);
-        showNotification(
-          'Connection Error', 
-          'There was an issue with the chat connection.',
-          'connection'
-        );
-      };
+    } else {
+      deleteUserMatch(data.userId);
+      console.log(`[FIND_MATCH] Cleaned stale user match for ${data.userId}`);
     }
+  }
+  
+  // Get current queue and remove current user if present
+  let queue = getWaitingQueue();
+  queue = queue.filter(p => p.id !== data.userId);
+  
+  // Enhanced matching logic with timezone preference
+  const timezone = parseFloat(data.timezone) || 0;
+  const compatiblePeer = queue.find(p => {
+    if (!timezone && !p.tz) return true; // Both have no timezone preference
+    if (!timezone || !p.tz) return true; // One has no preference, allow match
+    return Math.abs(p.tz - timezone) <= 12; // Within 12 hours
+  });
+  
+  if (compatiblePeer) {
+    // Create match with deterministic initiator
+    const peer1 = deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id;
+    const peer2 = peer1 === data.userId ? compatiblePeer.id : data.userId;
+    
+    const matchId = `m_${now}_${Math.random().toString(36).substr(2, 8)}`;
+    const matchInfo = createLightweightMatch(peer1, peer2, now);
+    
+    // Set up the match
+    setMatch(matchId, matchInfo);
+    setUserMatch(data.userId, matchId);
+    setUserMatch(compatiblePeer.id, matchId);
+    
+    // Remove both users from queue
+    const newQueue = queue.filter(p => p.id !== compatiblePeer.id);
+    setWaitingQueue(newQueue);
+    
+    console.log(`[FIND_MATCH] Created new match: ${data.userId} <-> ${compatiblePeer.id}`);
+    
+    return { 
+      status: 'matched',
+      matchId,
+      partnerId: compatiblePeer.id,
+      isInitiator: deterministic_initiator(data.userId, compatiblePeer.id),
+      existing: false,
+      timestamp: now
+    };
+  }
+  
+  // No match found, add to queue
+  queue.push({ 
+    id: data.userId, 
+    tz: timezone,
+    ts: now
+  });
+  
+  setWaitingQueue(queue);
+  console.log(`[FIND_MATCH] Added ${data.userId} to queue, position: ${queue.length}`);
+  
+  return { 
+    status: 'waiting',
+    position: queue.length,
+    estimated_wait: Math.min(queue.length * 5, 60), // Rough estimate in seconds
+    timestamp: now
+  };
+}
 
-    async function createOffer() {
-      try {
-        console.log('[WEBRTC] Creating offer');
-        const offer = await localConnection.createOffer();
-        await localConnection.setLocalDescription(offer);
-        batchedSignals.offer = offer;
-        await sendBatchedSignals();
-      } catch (error) {
-        console.error('[WEBRTC] Error creating offer:', error);
-        handleConnectionFailure();
-      }
-    }
-
-    async function handleOffer(offer) {
-      try {
-        await localConnection.setRemoteDescription(offer);
-        const answer = await localConnection.createAnswer();
-        await localConnection.setLocalDescription(answer);
-        batchedSignals.answer = answer;
-        await sendBatchedSignals();
-        if (answerTimeout) clearTimeout(answerTimeout);
-      } catch (error) {
-        console.error('[WEBRTC] Error handling offer:', error);
-        handleConnectionFailure();
-      }
-    }
-
-    async function handleAnswer(answer) {
-      try {
-        await localConnection.setRemoteDescription(answer);
-        if (offerTimeout) clearTimeout(offerTimeout);
-      } catch (error) {
-        console.error('[WEBRTC] Error handling answer:', error);
-        handleConnectionFailure();
-      }
-    }
-
-    async function handleIceCandidate(candidate) {
-      try {
-        await localConnection.addIceCandidate(candidate);
-      } catch (error) {
-        console.error('[WEBRTC] Error handling ICE candidate:', error);
-      }
-    }
-
-    function batchSignalsForSending() {
-      if (!signalingActive) return;
-      
-      if (batchTimeout) clearTimeout(batchTimeout);
-      batchTimeout = setTimeout(() => {
-        if (iceCandidatesQueue.length > 0) {
-          batchedSignals.ice = [...iceCandidatesQueue];
-          iceCandidatesQueue = [];
-          sendBatchedSignals();
-        }
-      }, 1000);
-    }
-
-    async function sendBatchedSignals() {
-      if (!currentMatch || !signalingActive) return;
-
-      try {
-        const payload = {
-          action: 'exchange-signals',
-          matchId: currentMatch.matchId,
-          acknowledgeIds: pendingSignalIds.length > 0 ? pendingSignalIds : undefined
-        };
-
-        if (batchedSignals.offer) {
-          payload.offer = batchedSignals.offer;
-          delete batchedSignals.offer;
-        }
-
-        if (batchedSignals.answer) {
-          payload.answer = batchedSignals.answer;
-          delete batchedSignals.answer;
-        }
-
-        if (batchedSignals.ice && batchedSignals.ice.length > 0) {
-          payload.ice = batchedSignals.ice;
-          delete batchedSignals.ice;
-        }
-
-        if (payload.offer || payload.answer || payload.ice || payload.acknowledgeIds) {
-          const result = await apiCall(payload);
-
-          if (result.signalIds) {
-            pendingSignalIds = [];
-          }
-
-          if (result.signals) {
-            await processSignals(result.signals);
-          }
-
-          adaptivePollingDelay = Math.max(3000, adaptivePollingDelay - 500);
-        }
-      } catch (error) {
-        console.error('[SIGNALING] Failed to send batched signals:', error);
-        adaptivePollingDelay = Math.min(15000, adaptivePollingDelay + 1000);
-      }
-    }
-
-    async function sendConnectionReady() {
-      if (!currentMatch) return;
-
-      try {
-        await apiCall({
-          action: 'exchange-signals',
-          matchId: currentMatch.matchId,
-          connectionReady: true,
-          acknowledgeIds: pendingSignalIds.length > 0 ? pendingSignalIds : undefined
+async function handleExchangeSignals(data, now) {
+  if (!data.matchId) {
+    return { status: 'error', message: 'Missing matchId parameter' };
+  }
+  
+  const validation = await validateMatch(data.matchId, data.userId);
+  if (!validation.valid) {
+    return { status: 'error', message: validation.error };
+  }
+  
+  let match = validation.match;
+  match = await cleanExpiredSignals(match, now);
+  
+  const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
+  let signalsAdded = 0;
+  
+  // Enhanced signal parsing with better error handling
+  if (data.offer) {
+    try {
+      const offer = JSON.parse(decodeURIComponent(data.offer));
+      if (now < match.timeouts.offer) {
+        match.signaling[partnerId].offers.push({
+          f: data.userId,
+          d: offer,
+          ts: now,
+          id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
         });
-        pendingSignalIds = [];
-      } catch (error) {
-        console.error('[SIGNALING] Failed to send connection ready:', error);
+        signalsAdded++;
+        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
       }
+    } catch (e) {
+      console.error('[SIGNALS] Failed to parse offer:', e.message);
     }
-
-    function startSignalingLoop() {
-      if (signalingInterval) clearInterval(signalingInterval);
-      
-      signalingInterval = setInterval(async () => {
-        if (!currentMatch || !signalingActive) {
-          stopSignalingLoop();
-          return;
-        }
+  }
+  
+  if (data.answer) {
+    try {
+      const answer = JSON.parse(decodeURIComponent(data.answer));
+      if (now < match.timeouts.answer) {
+        match.signaling[partnerId].answers.push({
+          f: data.userId,
+          d: answer,
+          ts: now,
+          id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
+        });
+        signalsAdded++;
+        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
+      }
+    } catch (e) {
+      console.error('[SIGNALS] Failed to parse answer:', e.message);
+    }
+  }
+  
+  if (data.ice) {
+    try {
+      const ice = JSON.parse(decodeURIComponent(data.ice));
+      if (Array.isArray(ice) && now < match.timeouts.connection) {
+        const currentIce = match.signaling[partnerId].ice.length;
+        const availableSlots = Math.max(0, 10 - currentIce);
+        const candidatesToAdd = ice.slice(0, availableSlots);
         
-        try {
-          const payload = {
-            action: 'exchange-signals',
-            matchId: currentMatch.matchId,
-            acknowledgeIds: pendingSignalIds.length > 0 ? pendingSignalIds : undefined
-          };
-
-          if (iceCandidatesQueue.length > 0) {
-            payload.ice = [...iceCandidatesQueue];
-            iceCandidatesQueue = [];
-          }
-
-          const result = await apiCall(payload);
-          
-          if (result && result.signalIds) {
-            pendingSignalIds = [];
-          }
-          
-          if (result && result.signals) {
-            await processSignals(result.signals);
-          }
-
-          adaptivePollingDelay = Math.max(3000, adaptivePollingDelay - 200);
-        } catch (error) {
-          console.error('[SIGNALING] Loop failed:', error);
-          adaptivePollingDelay = Math.min(15000, adaptivePollingDelay + 1000);
-          
-          if (error.message.includes('HTTP 500') || error.message.includes('Network')) {
-            stopSignalingLoop();
-            handleConnectionFailure();
-          }
-        }
-      }, adaptivePollingDelay);
-    }
-
-    function stopSignalingLoop() {
-      if (signalingInterval) {
-        clearInterval(signalingInterval);
-        signalingInterval = null;
-      }
-      signalingActive = false;
-    }
-
-    function startHeartbeat() {
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      
-      heartbeatInterval = setInterval(async () => {
-        if (signalingActive) return;
+        candidatesToAdd.forEach(candidate => {
+          match.signaling[partnerId].ice.push({
+            f: data.userId,
+            d: candidate,
+            ts: now,
+            id: `i_${now}_${Math.random().toString(36).substr(2, 4)}`
+          });
+          signalsAdded++;
+        });
         
-        try {
-          const result = await apiCall({ action: 'heartbeat' });
-          
-          if (result.matched && !currentMatch) {
-            currentMatch = {
-              matchId: result.matchId,
-              partnerId: result.partnerId,
-              isInitiator: result.isInitiator
-            };
-            
-            updateStatus('Reconnected to existing match...', 'signaling');
-            await createPeerConnection();
-            startSignalingLoop();
-            signalingActive = true;
-            
-            if (result.isInitiator) {
-              setTimeout(() => createOffer(), 1000);
-            }
-          }
-        } catch (error) {
-          console.error('[HEARTBEAT] Failed:', error);
+        if (candidatesToAdd.length > 0) {
+          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
         }
-      }, 15000);
-    }
-
-    function startPingLoop() {
-      setInterval(async () => {
-        if (isConnected && dataChannel && dataChannel.readyState === 'open') {
-          const now = Date.now();
-          if (now - lastPingTime > 25000) {
-            try {
-              dataChannel.send(JSON.stringify({
-                type: 'ping',
-                timestamp: now
-              }));
-              lastPingTime = now;
-            } catch (error) {
-              console.error('[PING] Failed:', error);
-            }
-          }
-        }
-      }, 30000);
-    }
-
-    async function processSignals(signals) {
-      if (!signals) return;
-      
-      try {
-        if (signals.offers && signals.offers.length > 0) {
-          for (const offer of signals.offers) {
-            await handleOffer(offer.offer);
-            pendingSignalIds.push(offer.id);
-          }
-        }
-
-        if (signals.answers && signals.answers.length > 0) {
-          for (const answer of signals.answers) {
-            await handleAnswer(answer.answer);
-            pendingSignalIds.push(answer.id);
-          }
-        }
-
-        if (signals.ice && signals.ice.length > 0) {
-          for (const ice of signals.ice) {
-            await handleIceCandidate(ice.candidate);
-            pendingSignalIds.push(ice.id);
-          }
-        }
-
-        if (signals.acks && signals.acks.length > 0) {
-          for (const ack of signals.acks) {
-            if (ack.type === 'connection_ready' || ack.type === 'ready') {
-              addSystemMessage('Partner is ready! Connection established.');
-            } else if (ack.type === 'ping') {
-              if (dataChannel && dataChannel.readyState === 'open') {
-                dataChannel.send(JSON.stringify({
-                  type: 'pong',
-                  timestamp: Date.now()
-                }));
-              }
-            }
-            pendingSignalIds.push(ack.id);
-          }
-        }
-
-        if (pendingSignalIds.length > 0) {
-          setTimeout(async () => {
-            try {
-              await apiCall({
-                action: 'exchange-signals',
-                matchId: currentMatch.matchId,
-                acknowledgeIds: [...pendingSignalIds]
-              });
-              pendingSignalIds = [];
-            } catch (error) {
-              console.error('[SIGNALING] Failed to acknowledge signals:', error);
-            }
-          }, 500);
-        }
-      } catch (error) {
-        console.error('[SIGNALING] Error processing signals:', error);
       }
+    } catch (e) {
+      console.error('[SIGNALS] Failed to parse ICE candidates:', e.message);
     }
+  }
+  
+  // Handle acknowledgments and special signals
+  if (data.connectionReady === 'true') {
+    match.signaling[partnerId].acks.push({
+      t: 'ready',
+      f: data.userId,
+      ts: now,
+      id: `r_${now}_${Math.random().toString(36).substr(2, 4)}`
+    });
+    match.status = 'connected';
+    console.log(`[SIGNALS] Connection ready from ${data.userId}`);
+    signalsAdded++;
+  }
+  
+  if (data.ping === 'true') {
+    match.signaling[partnerId].acks.push({
+      t: 'ping',
+      f: data.userId,
+      ts: now,
+      id: `p_${now}_${Math.random().toString(36).substr(2, 4)}`
+    });
+    console.log(`[SIGNALS] Ping from ${data.userId}`);
+    signalsAdded++;
+  }
+  
+  // Process acknowledgments
+  if (data.acknowledgeIds) {
+    try {
+      const ackIds = JSON.parse(decodeURIComponent(data.acknowledgeIds));
+      if (Array.isArray(ackIds) && ackIds.length > 0) {
+        const signals = match.signaling[data.userId];
+        let ackedCount = 0;
+        
+        signals.offers = signals.offers.filter(s => {
+          if (ackIds.includes(s.id)) {
+            ackedCount++;
+            return false;
+          }
+          return true;
+        });
+        
+        signals.answers = signals.answers.filter(s => {
+          if (ackIds.includes(s.id)) {
+            ackedCount++;
+            return false;
+          }
+          return true;
+        });
+        
+        signals.ice = signals.ice.filter(s => {
+          if (ackIds.includes(s.id)) {
+            ackedCount++;
+            return false;
+          }
+          return true;
+        });
+        
+        signals.acks = signals.acks.filter(s => {
+          if (ackIds.includes(s.id)) {
+            ackedCount++;
+            return false;
+          }
+          return true;
+        });
+        
+        if (ackedCount > 0) {
+          console.log(`[SIGNALS] Acknowledged ${ackedCount} signals for ${data.userId}`);
+        }
+      }
+    } catch (e) {
+      console.error('[SIGNALS] Failed to parse acknowledgeIds:', e.message);
+    }
+  }
+  
+  // Save updated match
+  setMatch(data.matchId, compressMatch(match));
+  
+  // Prepare response with pending signals
+  const mySignals = match.signaling[data.userId];
+  const pendingSignals = {
+    offers: mySignals.offers.map(s => ({
+      from: s.f,
+      offer: s.d,
+      timestamp: s.ts,
+      id: s.id
+    })),
+    answers: mySignals.answers.map(s => ({
+      from: s.f,
+      answer: s.d,
+      timestamp: s.ts,
+      id: s.id
+    })),
+    ice: mySignals.ice.map(s => ({
+      from: s.f,
+      candidate: s.d,
+      timestamp: s.ts,
+      id: s.id
+    })),
+    acks: mySignals.acks.map(s => ({
+      type: s.t,
+      from: s.f,
+      timestamp: s.ts,
+      id: s.id
+    }))
+  };
+  
+  const allSignalIds = [
+    ...pendingSignals.offers.map(s => s.id),
+    ...pendingSignals.answers.map(s => s.id),
+    ...pendingSignals.ice.map(s => s.id),
+    ...pendingSignals.acks.map(s => s.id)
+  ];
+  
+  const totalPending = allSignalIds.length;
+  if (totalPending > 0) {
+    console.log(`[SIGNALS] Returning ${totalPending} pending signals to ${data.userId}`);
+  }
+  
+  return {
+    status: 'signals',
+    signals: pendingSignals,
+    signalIds: allSignalIds,
+    partnerId: partnerId,
+    matchStatus: match.status,
+    signalsAdded: signalsAdded,
+    timestamp: now
+  };
+}
 
-    function handleDataChannelMessage(data) {
-      if (!data || !data.type) return;
+async function handleHeartbeat(data, now) {
+  const existingMatchId = getUserMatch(data.userId);
+  if (existingMatchId) {
+    const match = getMatch(existingMatchId);
+    if (match) {
+      const expanded = expandMatch(match);
+      const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
       
-      switch (data.type) {
-        case 'user-info':
-          partnerInfo = data;
-          addSystemMessage(`${data.name || 'Anonymous'} joined the chat!`);
-          
-          showNotification(
-            'Partner Joined!', 
-            `${data.name || 'Anonymous'} has joined the chat.`,
-            'connection'
-          );
-          
-          if (!greetingSent) {
-            greetingSent = true;
-            setTimeout(() => {
-              const currentName = nameInput ? nameInput.value : 'Anonymous';
-              const currentGender = genderSelect ? genderSelect.value : 'Unspecified';
-              const currentStatus = statusTextInput ? statusTextInput.value : '';
-              
-              const greeting = generateGreeting({
-                name: currentName,
-                gender: currentGender,
-                status: currentStatus
-              });
-              
-              const success = sendDataChannelMessage({
-                type: 'greeting',
-                name: currentName,
-                gender: currentGender,
-                status: currentStatus,
-                avatar: sessionStorage.getItem('avatar') || '',
-                content: greeting
-              });
-              
-              if (success) {
-                addGreetingMessage(currentName, greeting, sessionStorage.getItem('avatar') || '', true);
-              }
-            }, 1000);
-          }
-          break;
-          
-        case 'greeting':
-          if (data.name && data.content) {
-            addGreetingMessage(data.name, data.content, data.avatar, false);
-            
-            showNotification(
-              `${data.name} says hello!`, 
-              data.content,
-              'message'
-            );
-          }
-          break;
-          
-        case
+      return {
+        status: 'alive',
+        matched: true,
+        matchId: existingMatchId,
+        partnerId: partnerId,
+        isInitiator: deterministic_initiator(data.userId, partnerId),
+        matchStatus: expanded.status,
+        timestamp: now
+      };
+    } else {
+      deleteUserMatch(data.userId);
+      console.log(`[HEARTBEAT] Cleaned stale match reference for ${data.userId}`);
+    }
+  }
+  
+  return { 
+    status: 'alive',
+    matched: false,
+    timestamp: now
+  };
+}
+
+async function handleDisconnect(data) {
+  console.log(`[DISCONNECT] Processing disconnect for ${data.userId}`);
+  
+  // Remove from waiting queue
+  const queue = getWaitingQueue();
+  const filteredQueue = queue.filter(p => p.id !== data.userId);
+  if (filteredQueue.length !== queue.length) {
+    setWaitingQueue(filteredQueue);
+    console.log(`[DISCONNECT] Removed ${data.userId} from waiting queue`);
+  }
+  
+  // Handle active match
+  const existingMatchId = getUserMatch(data.userId);
+  if (existingMatchId) {
+    const match = getMatch(existingMatchId);
+    if (match) {
+      const partnerId = match.p1 === data.userId ? match.p2 : match.p1;
+      deleteUserMatch(partnerId);
+      console.log(`[DISCONNECT] Cleaned partner mapping: ${partnerId}`);
+    }
+    deleteMatch(existingMatchId);
+    deleteUserMatch(data.userId);
+    console.log(`[DISCONNECT] Cleaned match and user mapping for ${data.userId}`);
+  }
+  
+  // Remove heartbeat
+  heartbeats.delete(data.userId);
+  
+  return { 
+    status: 'disconnected',
+    timestamp: Date.now()
+  };
+}
