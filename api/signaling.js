@@ -231,7 +231,6 @@ function handleInstantMatch(userId, data, res) {
     const waitingUser = {
       userId,
       offer,
-      answer,
       userInfo: userInfo || {},
       timestamp: Date.now()
     };
@@ -244,7 +243,7 @@ function handleInstantMatch(userId, data, res) {
       status: 'waiting',
       position: waitingUsers.size,
       waitingUsers: waitingUsers.size,
-      message: 'Added to instant match queue with pre-generated signals',
+      message: 'Added to instant match queue with pre-generated offer only',
       estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
       timestamp: Date.now()
     });
