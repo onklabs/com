@@ -1,65 +1,51 @@
-// signaling_redis.js - Redis-based signaling server (for Upstash/Vercel)
+// signaling_vercel_api.js - Vercel-compatible KV signaling API (no express)
 
-import express from 'express';
-import { createClient } from '@upstash/redis';
+import { kv } from '@vercel/kv';
 
-const app = express();
-app.use(express.json());
+const MATCH_TTL = 300;
 
-const redis = createClient({
-  url: process.env.REDIS_URL
-});
+export default async function handler(req, res) {
+  const method = req.method;
+  const { userId, matchId, type, payload } = req.body || req.query || {};
 
-await redis.connect();
+  if (method === 'GET') {
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
-const MATCH_TTL = 300; // seconds
-const PORT = process.env.PORT || 3000;
-
-// GET /api/signaling?userId=...
-app.get('/api/signaling', async (req, res) => {
-  const userId = req.query.userId;
-  if (!userId) return res.status(400).json({ error: 'Missing userId' });
-
-  // Check if user is in a match
-  const matchKeys = await redis.keys('match:*');
-  for (const key of matchKeys) {
-    const match = await redis.json.get(key);
-    if (!match) continue;
-    if (match.p1 === userId || match.p2 === userId) {
-      const matchId = key.split(':')[1];
-      const partnerId = match.p1 === userId ? match.p2 : match.p1;
-      const signals = await redis.lrange(`signals:${matchId}:${userId}`, 0, -1);
-      await redis.del(`signals:${matchId}:${userId}`);
-      return res.json({
-        status: 'matched',
-        matchId,
-        partnerId,
-        isInitiator: match.p1 === userId,
-        signals: signals.map(s => JSON.parse(s)),
-        timestamp: Date.now()
-      });
+    const matchKeys = await kv.keys('match:*');
+    for (const key of matchKeys) {
+      const match = await kv.get(key);
+      if (!match) continue;
+      if (match.p1 === userId || match.p2 === userId) {
+        const matchId = key.split(':')[1];
+        const partnerId = match.p1 === userId ? match.p2 : match.p1;
+        const signalKey = `signals:${matchId}:${userId}`;
+        const signals = await kv.lrange(signalKey, 0, -1) || [];
+        await kv.del(signalKey);
+        return res.status(200).json({
+          status: 'matched',
+          matchId,
+          partnerId,
+          isInitiator: match.p1 === userId,
+          signals: signals.map(JSON.parse),
+          timestamp: Date.now()
+        });
+      }
     }
-  }
 
-  // If not matched, join queue
-  const queue = await redis.lrange('queue', 0, -1);
-  if (!queue.includes(userId)) {
-    await redis.rpush('queue', userId);
-  }
+    const queue = await kv.lrange('queue', 0, -1) || [];
+    if (!queue.includes(userId)) {
+      await kv.rpush('queue', userId);
+    }
 
-  // Try to match
-  const updatedQueue = await redis.lrange('queue', 0, -1);
-  if (updatedQueue.length >= 2) {
-    const p1 = updatedQueue[0];
-    const p2 = updatedQueue[1];
-    if (p1 && p2) {
+    const updatedQueue = await kv.lrange('queue', 0, -1) || [];
+    if (updatedQueue.length >= 2) {
+      const [p1, p2] = updatedQueue;
       const matchId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const match = { p1, p2, ts: Date.now(), status: 'pending' };
-      await redis.json.set(`match:${matchId}`, '$', match);
-      await redis.expire(`match:${matchId}`, MATCH_TTL);
-      await redis.lpop('queue');
-      await redis.lpop('queue');
-      return res.json({
+      await kv.set(`match:${matchId}`, match, { ex: MATCH_TTL });
+      await kv.lpop('queue');
+      await kv.lpop('queue');
+      return res.status(200).json({
         status: 'matched',
         matchId,
         partnerId: p2,
@@ -68,41 +54,32 @@ app.get('/api/signaling', async (req, res) => {
         timestamp: Date.now()
       });
     }
+
+    const position = updatedQueue.indexOf(userId);
+    return res.status(200).json({
+      status: 'waiting',
+      position: position + 1,
+      estimatedWait: Math.min((position + 1) * 5, 60),
+      timestamp: Date.now()
+    });
   }
 
-  const position = updatedQueue.indexOf(userId);
-  return res.json({
-    status: 'waiting',
-    position: position + 1,
-    estimatedWait: Math.min((position + 1) * 5, 60),
-    timestamp: Date.now()
-  });
-});
+  if (method === 'POST') {
+    if (!userId || !matchId || !type || !payload) {
+      return res.status(400).json({ error: 'Missing fields' });
+    }
 
-// POST /api/signaling (send signal)
-app.post('/api/signaling', async (req, res) => {
-  const { userId, matchId, type, payload } = req.body;
-  if (!userId || !matchId || !type || !payload) {
-    return res.status(400).json({ error: 'Missing fields' });
+    const match = await kv.get(`match:${matchId}`);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    const signal = JSON.stringify({ type, payload, from: userId, ts: Date.now() });
+
+    await kv.lpush(`signals:${matchId}:${partnerId}`, signal);
+    await kv.expire(`signals:${matchId}:${partnerId}`, MATCH_TTL);
+
+    return res.status(200).json({ status: 'ok' });
   }
 
-  const match = await redis.json.get(`match:${matchId}`);
-  if (!match) return res.status(404).json({ error: 'Match not found' });
-
-  const partnerId = match.p1 === userId ? match.p2 : match.p1;
-  const signal = JSON.stringify({ type, payload, from: userId, ts: Date.now() });
-
-  await redis.lpush(`signals:${matchId}:${partnerId}`, signal);
-  await redis.expire(`signals:${matchId}:${partnerId}`, MATCH_TTL);
-
-  res.json({ status: 'ok' });
-});
-
-// Health check
-app.get('/', (_, res) => {
-  res.send('Redis signaling server active');
-});
-
-app.listen(PORT, () => {
-  console.log(`Redis signaling running on port ${PORT}`);
-});
+  return res.status(405).json({ error: 'Method Not Allowed' });
+}
