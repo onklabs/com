@@ -1,312 +1,109 @@
-// Minimal WebRTC Signaling - Follow 7 Request Flow
-// Flow: join → offer → answer → ready (7 requests total)
+// signaling_redis.js - Redis-based signaling server (for Upstash/Vercel)
 
-let queue = [];
-let matches = new Map();
-const MATCH_TIMEOUT = 300000; // 5 minutes
+import express from 'express';
+import { createClient } from '@upstash/redis';
 
-function matchByUserId(userId) {
-  for (const [matchId, match] of matches.entries()) {
+const app = express();
+app.use(express.json());
+
+const redis = createClient({
+  url: process.env.REDIS_URL,
+  headers: { Authorization: `Bearer ${process.env.UPSTASH_TOKEN || ''}` }
+});
+
+await redis.connect();
+
+const MATCH_TTL = 300; // seconds
+const PORT = process.env.PORT || 3000;
+
+// GET /api/signaling?userId=...
+app.get('/api/signaling', async (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+  // Check if user is in a match
+  const matchKeys = await redis.keys('match:*');
+  for (const key of matchKeys) {
+    const match = await redis.json.get(key);
+    if (!match) continue;
     if (match.p1 === userId || match.p2 === userId) {
-      return { matchId, match };
-    }
-  }
-  return null;
-}
-
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  // GET: polling and health with detailed info
-  if (req.method === 'GET') {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.json({ 
-        status: 'online', 
-        stats: { 
-          waiting: queue.length, 
-          matches: matches.size,
-          totalUsers: queue.length + (matches.size * 2)
-        },
-        queueUserIds: queue, // All user IDs in queue
-        matchIds: Array.from(matches.keys()), // All active match IDs
-        timestamp: Date.now()
-      });
-    }
-    return handlePoll(userId, res);
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'GET for polling, POST for actions' });
-  }
-  
-  try {
-    // Handle both application/json and text/plain to avoid OPTIONS
-    const data = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const { action, userId } = data;
-    
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
-    
-    switch (action) {
-      case 'join-queue': 
-        return handleJoin(userId, res);
-      case 'send-signal': 
-        return handleSend(userId, data, res);
-      case 'disconnect': 
-        return handleDisconnect(userId, res);
-      default: 
-        return res.status(400).json({ error: `Unknown action: ${action}` });
-    }
-  } catch (error) {
-    console.error('[SERVER ERROR]', error);
-    return res.status(500).json({ error: 'Server error' });
-  }
-}
-
-// ==========================================
-// HANDLERS
-// ==========================================
-
-function handlePoll(userId, res) {
-  console.log(`[MATCH DEBUG] Active matches: ${matches.size}`);
-  cleanup();
-
-  const found = matchByUserId(userId);
-  if (found) {
-    const { matchId, match } = found;
-    const partnerId = match.p1 === userId ? match.p2 : match.p1;
-    const signals = match.signals[userId] || [];
-    match.signals[userId] = [];
-
-    const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
-
-    if (ready && !match.cleanup) {
-      match.cleanup = true;
-      match.status = 'connected';
-      setTimeout(() => {
-        console.log(`[CLEANUP] Removing connected match ${matchId}`);
-        matches.delete(matchId);
-      }, 60000);
-    }
-
-    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}`);
-
-    return res.json({
-      status: ready ? 'connected' : 'matched',
-      matchId: ready ? undefined : matchId,
-      partnerId,
-      isInitiator: match.p1 === userId,
-      signals,
-      connectionReady: ready,
-      timestamp: Date.now()
-    });
-  }
-
-  const pos = queue.findIndex(id => id === userId);
-  if (pos !== -1) {
-    console.log(`[POLL] ${userId} -> queue position ${pos + 1}`);
-
-    return res.json({
-      status: 'waiting',
-      position: pos + 1,
-      estimatedWait: Math.min((pos + 1) * 5, 60),
-      queueAhead: queue.slice(0, pos),
-      timestamp: Date.now()
-    });
-  }
-
-  console.log(`[POLL] ${userId} -> not found`);
-  return res.json({
-    status: 'not_found',
-    action_needed: 'join-queue',
-    timestamp: Date.now()
-  });
-}
-
-function handleJoin(userId, res) {
-  cleanup();
-  
-  // Check existing match first
-  for (const [matchId, match] of matches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
+      const matchId = key.split(':')[1];
       const partnerId = match.p1 === userId ? match.p2 : match.p1;
-      const signals = match.signals[userId] || [];
-      match.signals[userId] = []; // Clear after reading
-      
-      console.log(`[JOIN] ${userId} -> existing match ${matchId}`);
-      
+      const signals = await redis.lrange(`signals:${matchId}:${userId}`, 0, -1);
+      await redis.del(`signals:${matchId}:${userId}`);
       return res.json({
         status: 'matched',
         matchId,
         partnerId,
         isInitiator: match.p1 === userId,
-        signals,
-        connectionReady: signals.some(s => s.type === 'ready'),
-        queueUserIds: queue,
-        matchIds: Array.from(matches.keys()),
+        signals: signals.map(s => JSON.parse(s)),
         timestamp: Date.now()
       });
     }
   }
-  
-  // Remove from queue if present
-  queue = queue.filter(id => id !== userId);
-  
-  // Try to match with someone in queue
-  if (queue.length > 0) {
-    const partnerId = queue.shift();
-    const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    
-    // Consistent ordering: smaller userId is p1
-    const p1 = userId < partnerId ? userId : partnerId;
-    const p2 = userId < partnerId ? partnerId : userId;
-    
-    const match = {
-      p1, 
-      p2, 
-      ts: Date.now(),
-      status: 'signaling',
-      signals: { [p1]: [], [p2]: [] },
-      cleanup: false
-    };
-    
-    matches.set(matchId, match);
-    
-    console.log(`[MATCHED] ${p1} <-> ${p2} (${matchId})`);
-    
-    return res.json({
-      status: 'matched',
-      matchId,
-      partnerId,
-      isInitiator: userId === p1,
-      signals: [],
-      connectionReady: false,
-      queueUserIds: queue,
-      matchIds: Array.from(matches.keys()),
-      timestamp: Date.now()
-    });
-  }
-  
-  // Add to queue
+
+  // If not matched, join queue
+  const queue = await redis.lrange('queue', 0, -1);
   if (!queue.includes(userId)) {
-    queue.push(userId);
+    await redis.rpush('queue', userId);
   }
-  
-  console.log(`[QUEUE] ${userId} -> position ${queue.length}`);
-  
+
+  // Try to match
+  const updatedQueue = await redis.lrange('queue', 0, -1);
+  if (updatedQueue.length >= 2) {
+    const p1 = updatedQueue[0];
+    const p2 = updatedQueue[1];
+    if (p1 && p2) {
+      const matchId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const match = { p1, p2, ts: Date.now(), status: 'pending' };
+      await redis.json.set(`match:${matchId}`, '$', match);
+      await redis.expire(`match:${matchId}`, MATCH_TTL);
+      await redis.lpop('queue');
+      await redis.lpop('queue');
+      return res.json({
+        status: 'matched',
+        matchId,
+        partnerId: p2,
+        isInitiator: true,
+        signals: [],
+        timestamp: Date.now()
+      });
+    }
+  }
+
+  const position = updatedQueue.indexOf(userId);
   return res.json({
-    status: 'queued',
-    position: queue.length,
-    estimatedWait: Math.min(queue.length * 5, 60),
-    queueUserIds: queue,
-    matchIds: Array.from(matches.keys()),
+    status: 'waiting',
+    position: position + 1,
+    estimatedWait: Math.min((position + 1) * 5, 60),
     timestamp: Date.now()
   });
-}
+});
 
-function handleSend(userId, data, res) {
-  const { matchId, type, payload } = data;
-  
-  const match = matches.get(matchId);
-  if (!match) {
-    console.log(`[SEND ERROR] Match ${matchId} not found`);
-    return res.status(404).json({ error: 'Match not found' });
+// POST /api/signaling (send signal)
+app.post('/api/signaling', async (req, res) => {
+  const { userId, matchId, type, payload } = req.body;
+  if (!userId || !matchId || !type || !payload) {
+    return res.status(400).json({ error: 'Missing fields' });
   }
-  
-  if (match.p1 !== userId && match.p2 !== userId) {
-    console.log(`[SEND ERROR] User ${userId} not in match ${matchId}`);
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-  
+
+  const match = await redis.json.get(`match:${matchId}`);
+  if (!match) return res.status(404).json({ error: 'Match not found' });
+
   const partnerId = match.p1 === userId ? match.p2 : match.p1;
-  
-  // Add signal to partner's queue
-  match.signals[partnerId] = match.signals[partnerId] || [];
-  match.signals[partnerId].push({ 
-    type, 
-    payload, 
-    from: userId, 
-    ts: Date.now() 
-  });
-  
-  // Limit signals to prevent memory bloat
-  if (match.signals[partnerId].length > 20) {
-    match.signals[partnerId] = match.signals[partnerId].slice(-20);
-  }
-  
-  // Update match status if ready signal
-  if (type === 'ready') {
-    match.status = 'connected';
-  }
-  
-  // Get my pending signals
-  const mySignals = match.signals[userId] || [];
-  match.signals[userId] = []; // Clear after reading
-  
-  const ready = mySignals.some(s => s.type === 'ready') || match.status === 'connected';
-  
-  // Schedule cleanup for successful connections
-  if (ready && !match.cleanup) {
-    match.cleanup = true;
-    setTimeout(() => {
-      console.log(`[CLEANUP] Removing connected match ${matchId}`);
-      matches.delete(matchId);
-    }, 60000);
-  }
-  
-  console.log(`[SEND] ${userId} -> ${partnerId} (${type}), ready: ${ready}`);
-  
-  return res.json({
-    status: ready ? 'connected' : 'sent',
-    matchId: ready ? undefined : matchId,
-    partnerId,
-    signals: mySignals,
-    connectionReady: ready,
-    timestamp: Date.now()
-  });
-}
+  const signal = JSON.stringify({ type, payload, from: userId, ts: Date.now() });
 
-function handleDisconnect(userId, res) {
-  console.log(`[DISCONNECT] ${userId}`);
-  
-  // Remove from queue
-  queue = queue.filter(id => id !== userId);
-  
-  // Remove from matches
-  for (const [matchId, match] of matches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      console.log(`[DISCONNECT] Removing match ${matchId}`);
-      matches.delete(matchId);
-      break;
-    }
-  }
-  
-  return res.json({ 
-    status: 'disconnected',
-    timestamp: Date.now()
-  });
-}
+  await redis.lpush(`signals:${matchId}:${partnerId}`, signal);
+  await redis.expire(`signals:${matchId}:${partnerId}`, MATCH_TTL);
 
-// ==========================================
-// CLEANUP
-// ==========================================
+  res.json({ status: 'ok' });
+});
 
-function cleanup() {
-  const now = Date.now();
-  let cleaned = 0;
+// Health check
+app.get('/', (_, res) => {
+  res.send('Redis signaling server active');
+});
 
-  for (const [matchId, match] of matches.entries()) {
-    // Giữ match ít nhất 60 giây sau khi tạo
-    if (now - match.ts > 180000) {
-      console.log(`[CLEANUP] Removing match ${matchId} (age=${now - match.ts}ms)`);
-      matches.delete(matchId);
-      cleaned++;
-    }
-  }
-
-  if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} expired matches. Active matches now: ${matches.size}`);
-  }
-}
+app.listen(PORT, () => {
+  console.log(`Redis signaling running on port ${PORT}`);
+});
