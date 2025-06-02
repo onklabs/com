@@ -5,6 +5,15 @@ let queue = [];
 let matches = new Map();
 const MATCH_TIMEOUT = 300000; // 5 minutes
 
+function matchByUserId(userId) {
+  for (const [matchId, match] of matches.entries()) {
+    if (match.p1 === userId || match.p2 === userId) {
+      return { matchId, match };
+    }
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
@@ -62,45 +71,42 @@ export default async function handler(req, res) {
 
 function handlePoll(userId, res) {
   cleanup();
-  
-  // Check active match
-  for (const [matchId, match] of matches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      const partnerId = match.p1 === userId ? match.p2 : match.p1;
-      const signals = match.signals[userId] || [];
-      match.signals[userId] = []; // Clear after reading
-      
-      const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
-      
-      // Schedule cleanup for successful connections
-      if (ready && !match.cleanup) {
-        match.cleanup = true;
-        match.status = 'connected';
-        setTimeout(() => {
-          console.log(`[CLEANUP] Removing connected match ${matchId}`);
-          matches.delete(matchId);
-        }, 60000); // 15 seconds after connection
-      }
-      
-      console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}`);
-      
-      return res.json({
-        status: ready ? 'connected' : 'matched',
-        matchId: ready ? undefined : matchId,
-        partnerId,
-        isInitiator: match.p1 === userId,
-        signals,
-        connectionReady: ready,
-        timestamp: Date.now()
-      });
+
+  const found = matchByUserId(userId);
+  if (found) {
+    const { matchId, match } = found;
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    const signals = match.signals[userId] || [];
+    match.signals[userId] = [];
+
+    const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
+
+    if (ready && !match.cleanup) {
+      match.cleanup = true;
+      match.status = 'connected';
+      setTimeout(() => {
+        console.log(`[CLEANUP] Removing connected match ${matchId}`);
+        matches.delete(matchId);
+      }, 60000);
     }
+
+    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}`);
+
+    return res.json({
+      status: ready ? 'connected' : 'matched',
+      matchId: ready ? undefined : matchId,
+      partnerId,
+      isInitiator: match.p1 === userId,
+      signals,
+      connectionReady: ready,
+      timestamp: Date.now()
+    });
   }
-  
-  // Check queue position
+
   const pos = queue.findIndex(id => id === userId);
   if (pos !== -1) {
     console.log(`[POLL] ${userId} -> queue position ${pos + 1}`);
-    
+
     return res.json({
       status: 'waiting',
       position: pos + 1,
@@ -109,10 +115,10 @@ function handlePoll(userId, res) {
       timestamp: Date.now()
     });
   }
-  
+
   console.log(`[POLL] ${userId} -> not found`);
-  return res.json({ 
-    status: 'not_found', 
+  return res.json({
+    status: 'not_found',
     action_needed: 'join-queue',
     timestamp: Date.now()
   });
