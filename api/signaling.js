@@ -26,7 +26,7 @@ if (!cleanupInterval) {
 }
 
 export default async function handler(req, res) {
-  // Simplified CORS - no OPTIONS handling
+  // Simplified CORS - NO OPTIONS support at all
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -39,7 +39,14 @@ export default async function handler(req, res) {
     }
     
     if (method === 'POST') {
-      const data = typeof body === 'string' ? JSON.parse(body) : body;
+      // Handle both application/json and text/plain to avoid preflight
+      let data;
+      if (typeof body === 'string') {
+        data = JSON.parse(body);
+      } else {
+        data = body;
+      }
+      
       const { action, userId } = data;
       
       if (!userId) {
@@ -63,6 +70,7 @@ export default async function handler(req, res) {
       }
     }
     
+    // Reject OPTIONS and other methods completely
     return res.status(405).json({ error: 'Method not allowed' });
     
   } catch (error) {
