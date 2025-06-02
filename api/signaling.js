@@ -94,15 +94,15 @@ export default async function handler(req, res) {
 // ==========================================
 
 function handleInstantMatch(userId, data, res) {
-  const { offer, answer, userInfo, preferredMatchId } = data;
+  const { offer, userInfo, preferredMatchId } = data;
   
-  console.log(`[INSTANT-MATCH] ${userId} with pre-generated signals`);
+  console.log(`[INSTANT-MATCH] ${userId} with pre-generated offer`);
   
-  // Validate required data
-  if (!offer || !answer) {
+  // Validate required data - only offer needed now
+  if (!offer) {
     return res.status(400).json({ 
-      error: 'Both offer and answer are required for instant matching',
-      required: ['userId', 'offer', 'answer']
+      error: 'Pre-generated offer is required for instant matching',
+      required: ['userId', 'offer']
     });
   }
   
@@ -190,15 +190,7 @@ function handleInstantMatch(userId, data, res) {
     
     // Pre-populate signals for instant connection
     if (isUserInitiator) {
-      // User is initiator, gets partner's answer
-      match.signals[userId].push({
-        type: 'answer',
-        payload: partnerUser.answer,
-        from: partnerId,
-        timestamp: Date.now(),
-        preGenerated: true
-      });
-      // Partner gets user's offer
+      // User is initiator, partner gets user's offer (will create real answer)
       match.signals[partnerId].push({
         type: 'offer', 
         payload: offer,
@@ -207,19 +199,11 @@ function handleInstantMatch(userId, data, res) {
         preGenerated: true
       });
     } else {
-      // Partner is initiator, user gets partner's offer
+      // Partner is initiator, user gets partner's offer (will create real answer)
       match.signals[userId].push({
         type: 'offer',
         payload: partnerUser.offer,
         from: partnerId,
-        timestamp: Date.now(),
-        preGenerated: true
-      });
-      // Partner gets user's answer
-      match.signals[partnerId].push({
-        type: 'answer',
-        payload: answer,
-        from: userId,
         timestamp: Date.now(),
         preGenerated: true
       });
