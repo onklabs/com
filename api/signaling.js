@@ -47,7 +47,6 @@ export default async function handler(req, res) {
     const data = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { action, userId } = data;
     
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
     
     switch (action) {
       case 'join-queue': 
