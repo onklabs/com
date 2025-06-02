@@ -295,14 +295,15 @@ function handleDisconnect(userId, res) {
 function cleanup() {
   const now = Date.now();
   let cleaned = 0;
-  
+
   for (const [matchId, match] of matches.entries()) {
+    // Giữ match ít nhất 10s sau khi tạo
     if (now - match.ts > MATCH_TIMEOUT) {
       matches.delete(matchId);
       cleaned++;
     }
   }
-  
+
   if (cleaned > 0) {
     console.log(`[CLEANUP] Removed ${cleaned} old matches. Active: queue=${queue.length}, matches=${matches.size}`);
   }
