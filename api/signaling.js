@@ -1,7 +1,7 @@
-// Instant Match Server - Pre-generated Offer/Answer Exchange
-// Revolutionary approach: Send offer/answer with first request for instant matching!
+// WebRTC Signaling Server - Standard Offer/Answer Exchange
+// Synchronized with fixed client that generates fresh signals
 
-let waitingUsers = new Map(); // userId -> { userId, offer, answer, timestamp, userInfo }
+let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo }
 let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
 const USER_TIMEOUT = 120000; // 2 minutes for waiting users
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
     
     if (debug === 'true') {
       return res.json({
-        status: 'instant-match-server',
+        status: 'webrtc-signaling-server',
         stats: {
           waitingUsers: waitingUsers.size,
           activeMatches: activeMatches.size,
@@ -40,18 +40,18 @@ export default async function handler(req, res) {
     cleanup();
     
     return res.json({ 
-      status: 'instant-match-ready',
+      status: 'signaling-ready',
       stats: { 
         waiting: waitingUsers.size, 
         matches: activeMatches.size
       },
-      message: 'Send POST with userId + pre-generated offer/answer for instant matching',
+      message: 'WebRTC signaling server ready for connections',
       timestamp: Date.now()
     });
   }
   
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'POST required for instant matching' });
+    return res.status(405).json({ error: 'POST required for signaling' });
   }
   
   try {
@@ -90,21 +90,13 @@ export default async function handler(req, res) {
 }
 
 // ==========================================
-// INSTANT MATCH HANDLER
+// INSTANT MATCH HANDLER (SIMPLIFIED)
 // ==========================================
 
 function handleInstantMatch(userId, data, res) {
-  const { offer, userInfo, preferredMatchId } = data;
+  const { userInfo, preferredMatchId } = data;
   
-  console.log(`[INSTANT-MATCH] ${userId} with pre-generated offer`);
-  
-  // Validate required data - only offer needed now
-  if (!offer) {
-    return res.status(400).json({ 
-      error: 'Pre-generated offer is required for instant matching',
-      required: ['userId', 'offer']
-    });
-  }
+  console.log(`[INSTANT-MATCH] ${userId} looking for partner`);
   
   // Cleanup first
   cleanup();
@@ -131,13 +123,14 @@ function handleInstantMatch(userId, data, res) {
   for (const [waitingUserId, waitingUser] of waitingUsers.entries()) {
     if (waitingUserId === userId) continue;
     
-    // Calculate compatibility score (can be enhanced with preferences)
+    // Calculate compatibility score
     let score = 1;
     
-    // Prefer users with similar userInfo if available
+    // Prefer users with complementary userInfo if available
     if (userInfo && waitingUser.userInfo) {
       if (userInfo.gender && waitingUser.userInfo.gender && 
-          userInfo.gender !== waitingUser.userInfo.gender) {
+          userInfo.gender !== waitingUser.userInfo.gender && 
+          userInfo.gender !== 'Unspecified' && waitingUser.userInfo.gender !== 'Unspecified') {
         score += 2; // Bonus for different genders
       }
       if (userInfo.status && waitingUser.userInfo.status &&
@@ -149,6 +142,7 @@ function handleInstantMatch(userId, data, res) {
     // Prefer newer users (less waiting time)
     const waitTime = Date.now() - waitingUser.timestamp;
     if (waitTime < 30000) score += 1; // Less than 30 seconds
+    if (waitTime < 10000) score += 1; // Less than 10 seconds (very fresh)
     
     if (score > bestMatchScore) {
       bestMatchScore = score;
@@ -164,54 +158,32 @@ function handleInstantMatch(userId, data, res) {
     // Remove partner from waiting list
     waitingUsers.delete(partnerId);
     
-    // Create match with pre-generated matchId
-    const matchId = preferredMatchId || `instant_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    // Create match
+    const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     
     // Determine who is initiator (consistent ordering)
     const isUserInitiator = userId < partnerId;
     const p1 = isUserInitiator ? userId : partnerId;
     const p2 = isUserInitiator ? partnerId : userId;
     
-    // Create match with pre-exchanged signals
+    // Create match without pre-exchanged signals
     const match = {
       p1,
       p2,
       timestamp: Date.now(),
       signals: {
-        [p1]: [], // Initiator gets partner's answer
-        [p2]: []  // Receiver gets partner's offer
+        [p1]: [], // Initiator's signal queue
+        [p2]: []  // Receiver's signal queue
       },
-      preExchanged: true,
       userInfo: {
         [userId]: userInfo || {},
         [partnerId]: partnerUser.userInfo || {}
       }
     };
     
-    // Pre-populate signals for instant connection
-    if (isUserInitiator) {
-      // User is initiator, partner gets user's offer (will create real answer)
-      match.signals[partnerId].push({
-        type: 'offer', 
-        payload: offer,
-        from: userId,
-        timestamp: Date.now(),
-        preGenerated: true
-      });
-    } else {
-      // Partner is initiator, user gets partner's offer (will create real answer)
-      match.signals[userId].push({
-        type: 'offer',
-        payload: partnerUser.offer,
-        from: partnerId,
-        timestamp: Date.now(),
-        preGenerated: true
-      });
-    }
-    
     activeMatches.set(matchId, match);
     
-    console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - PRE-EXCHANGED!`);
+    console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'}`);
     
     return res.json({
       status: 'instant-match',
@@ -219,10 +191,9 @@ function handleInstantMatch(userId, data, res) {
       partnerId,
       isInitiator: isUserInitiator,
       partnerInfo: partnerUser.userInfo || {},
-      signals: match.signals[userId] || [],
-      preExchanged: true,
+      signals: [], // No pre-exchanged signals
       compatibility: bestMatchScore,
-      message: 'Instant match with pre-exchanged offer/answer!',
+      message: 'Instant match found! WebRTC connection will be established.',
       timestamp: Date.now()
     });
     
@@ -230,20 +201,20 @@ function handleInstantMatch(userId, data, res) {
     // No immediate match, add to waiting list
     const waitingUser = {
       userId,
-      offer,
       userInfo: userInfo || {},
       timestamp: Date.now()
     };
     
     waitingUsers.set(userId, waitingUser);
     
-    console.log(`[INSTANT-MATCH] ${userId} added to waiting list (${waitingUsers.size} waiting)`);
+    const position = waitingUsers.size;
+    console.log(`[INSTANT-MATCH] ${userId} added to waiting list (position ${position})`);
     
     return res.json({
       status: 'waiting',
-      position: waitingUsers.size,
+      position,
       waitingUsers: waitingUsers.size,
-      message: 'Added to instant match queue with pre-generated offer only',
+      message: 'Added to matching queue. Waiting for partner...',
       estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
       timestamp: Date.now()
     });
@@ -261,7 +232,7 @@ function handleGetSignals(userId, res) {
       const partnerId = match.p1 === userId ? match.p2 : match.p1;
       const signals = match.signals[userId] || [];
       
-      // Clear signals after reading
+      // Clear signals after reading to prevent duplicates
       match.signals[userId] = [];
       
       console.log(`[GET-SIGNALS] ${userId} -> ${signals.length} signals from match ${matchId}`);
@@ -272,7 +243,6 @@ function handleGetSignals(userId, res) {
         partnerId,
         isInitiator: match.p1 === userId,
         signals,
-        preExchanged: match.preExchanged || false,
         timestamp: Date.now()
       });
     }
@@ -299,6 +269,13 @@ function handleGetSignals(userId, res) {
 function handleSendSignal(userId, data, res) {
   const { matchId, type, payload } = data;
   
+  if (!matchId || !type || !payload) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      required: ['matchId', 'type', 'payload']
+    });
+  }
+  
   const match = activeMatches.get(matchId);
   if (!match) {
     console.log(`[SEND-SIGNAL] Match ${matchId} not found`);
@@ -310,23 +287,29 @@ function handleSendSignal(userId, data, res) {
   }
   
   if (match.p1 !== userId && match.p2 !== userId) {
-    return res.status(403).json({ error: 'User not in match' });
+    return res.status(403).json({ error: 'User not in this match' });
   }
   
   const partnerId = match.p1 === userId ? match.p2 : match.p1;
   
   // Add signal to partner's queue
-  match.signals[partnerId] = match.signals[partnerId] || [];
-  match.signals[partnerId].push({
+  if (!match.signals[partnerId]) {
+    match.signals[partnerId] = [];
+  }
+  
+  const signal = {
     type,
     payload,
     from: userId,
     timestamp: Date.now()
-  });
+  };
   
-  // Limit signals
-  if (match.signals[partnerId].length > 50) {
+  match.signals[partnerId].push(signal);
+  
+  // Limit signal queue size to prevent memory bloat
+  if (match.signals[partnerId].length > 100) {
     match.signals[partnerId] = match.signals[partnerId].slice(-50);
+    console.log(`[SEND-SIGNAL] Trimmed signal queue for ${partnerId}`);
   }
   
   console.log(`[SEND-SIGNAL] ${userId} -> ${partnerId} (${type}) in match ${matchId}`);
@@ -334,6 +317,7 @@ function handleSendSignal(userId, data, res) {
   return res.json({
     status: 'sent',
     partnerId,
+    signalType: type,
     queueLength: match.signals[partnerId].length,
     timestamp: Date.now()
   });
@@ -342,26 +326,52 @@ function handleSendSignal(userId, data, res) {
 function handleDisconnect(userId, res) {
   console.log(`[DISCONNECT] ${userId}`);
   
-  // Remove from waiting list
-  waitingUsers.delete(userId);
+  let removed = false;
   
-  // Remove from active matches
+  // Remove from waiting list
+  if (waitingUsers.has(userId)) {
+    waitingUsers.delete(userId);
+    removed = true;
+    console.log(`[DISCONNECT] Removed ${userId} from waiting list`);
+  }
+  
+  // Remove from active matches and notify partner
   for (const [matchId, match] of activeMatches.entries()) {
     if (match.p1 === userId || match.p2 === userId) {
-      console.log(`[DISCONNECT] Removing match ${matchId}`);
-      activeMatches.delete(matchId);
+      const partnerId = match.p1 === userId ? match.p2 : match.p1;
+      
+      // Add disconnect signal to partner's queue
+      if (match.signals[partnerId]) {
+        match.signals[partnerId].push({
+          type: 'disconnect',
+          payload: { reason: 'partner_disconnected' },
+          from: userId,
+          timestamp: Date.now()
+        });
+      }
+      
+      console.log(`[DISCONNECT] Removing match ${matchId}, notifying ${partnerId}`);
+      
+      // Remove match after a delay to let partner receive disconnect signal
+      setTimeout(() => {
+        activeMatches.delete(matchId);
+        console.log(`[DISCONNECT] Match ${matchId} cleaned up`);
+      }, 5000);
+      
+      removed = true;
       break;
     }
   }
   
   return res.json({ 
     status: 'disconnected',
+    removed,
     timestamp: Date.now()
   });
 }
 
 // ==========================================
-// CLEANUP
+// CLEANUP UTILITIES
 // ==========================================
 
 function cleanup() {
@@ -385,7 +395,7 @@ function cleanup() {
     }
   }
   
-  // Prevent memory bloat
+  // Prevent memory bloat - remove oldest users if too many waiting
   if (waitingUsers.size > MAX_WAITING_USERS) {
     const excess = waitingUsers.size - MAX_WAITING_USERS;
     const oldestUsers = Array.from(waitingUsers.entries())
@@ -396,9 +406,14 @@ function cleanup() {
       waitingUsers.delete(userId);
       cleanedUsers++;
     });
+    
+    console.log(`[CLEANUP] Removed ${excess} oldest users due to capacity limit`);
   }
   
   if (cleanedUsers > 0 || cleanedMatches > 0) {
     console.log(`[CLEANUP] Removed ${cleanedUsers} expired users, ${cleanedMatches} old matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
   }
 }
+
+// Auto-cleanup every 5 minutes
+setInterval(cleanup, 300000);
