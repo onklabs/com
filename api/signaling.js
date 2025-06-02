@@ -1,9 +1,10 @@
-// Minimal WebRTC Signaling - Follow 7 Request Flow
+// Fixed WebRTC Signaling - Extended Match Lifetime
 // Flow: join → offer → answer → ready (7 requests total)
 
 let queue = [];
 let matches = new Map();
-const MATCH_TIMEOUT = 300000; // 5 minutes
+const MATCH_TIMEOUT = 600000; // 10 minutes (increased from 5)
+const MIN_MATCH_LIFETIME = 120000; // Keep matches alive for at least 2 minutes
 
 function matchByUserId(userId) {
   for (const [matchId, match] of matches.entries()) {
@@ -30,8 +31,8 @@ export default async function handler(req, res) {
           matches: matches.size,
           totalUsers: queue.length + (matches.size * 2)
         },
-        queueUserIds: queue, // All user IDs in queue
-        matchIds: Array.from(matches.keys()), // All active match IDs
+        queueUserIds: queue,
+        matchIds: Array.from(matches.keys()),
         timestamp: Date.now()
       });
     }
@@ -43,10 +44,8 @@ export default async function handler(req, res) {
   }
   
   try {
-    // Handle both application/json and text/plain to avoid OPTIONS
     const data = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { action, userId } = data;
-    
     
     switch (action) {
       case 'join-queue': 
@@ -69,7 +68,7 @@ export default async function handler(req, res) {
 // ==========================================
 
 function handlePoll(userId, res) {
-  console.log(`[MATCH DEBUG] Active matches: ${matches.size}`);
+  console.log(`[POLL] ${userId} polling...`);
   cleanup();
 
   const found = matchByUserId(userId);
@@ -77,20 +76,14 @@ function handlePoll(userId, res) {
     const { matchId, match } = found;
     const partnerId = match.p1 === userId ? match.p2 : match.p1;
     const signals = match.signals[userId] || [];
-    match.signals[userId] = [];
+    match.signals[userId] = []; // Clear after reading
+
+    // Update last activity to prevent premature cleanup
+    match.lastActivity = Date.now();
 
     const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
 
-    if (ready && !match.cleanup) {
-      match.cleanup = true;
-      match.status = 'connected';
-      setTimeout(() => {
-        console.log(`[CLEANUP] Removing connected match ${matchId}`);
-        matches.delete(matchId);
-      }, 60000);
-    }
-
-    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}`);
+    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}, age: ${Date.now() - match.ts}ms`);
 
     return res.json({
       status: ready ? 'connected' : 'matched',
@@ -99,6 +92,7 @@ function handlePoll(userId, res) {
       isInitiator: match.p1 === userId,
       signals,
       connectionReady: ready,
+      matchAge: Date.now() - match.ts,
       timestamp: Date.now()
     });
   }
@@ -106,7 +100,6 @@ function handlePoll(userId, res) {
   const pos = queue.findIndex(id => id === userId);
   if (pos !== -1) {
     console.log(`[POLL] ${userId} -> queue position ${pos + 1}`);
-
     return res.json({
       status: 'waiting',
       position: pos + 1,
@@ -134,7 +127,10 @@ function handleJoin(userId, res) {
       const signals = match.signals[userId] || [];
       match.signals[userId] = []; // Clear after reading
       
-      console.log(`[JOIN] ${userId} -> existing match ${matchId}`);
+      // Update activity
+      match.lastActivity = Date.now();
+      
+      console.log(`[JOIN] ${userId} -> existing match ${matchId} (age: ${Date.now() - match.ts}ms)`);
       
       return res.json({
         status: 'matched',
@@ -143,6 +139,7 @@ function handleJoin(userId, res) {
         isInitiator: match.p1 === userId,
         signals,
         connectionReady: signals.some(s => s.type === 'ready'),
+        matchAge: Date.now() - match.ts,
         queueUserIds: queue,
         matchIds: Array.from(matches.keys()),
         timestamp: Date.now()
@@ -166,9 +163,11 @@ function handleJoin(userId, res) {
       p1, 
       p2, 
       ts: Date.now(),
+      lastActivity: Date.now(), // Track last activity
       status: 'signaling',
       signals: { [p1]: [], [p2]: [] },
-      cleanup: false
+      cleanup: false,
+      iceCount: 0 // Track ICE candidates
     };
     
     matches.set(matchId, match);
@@ -182,6 +181,7 @@ function handleJoin(userId, res) {
       isInitiator: userId === p1,
       signals: [],
       connectionReady: false,
+      matchAge: 0,
       queueUserIds: queue,
       matchIds: Array.from(matches.keys()),
       timestamp: Date.now()
@@ -210,7 +210,7 @@ function handleSend(userId, data, res) {
   
   const match = matches.get(matchId);
   if (!match) {
-    console.log(`[SEND ERROR] Match ${matchId} not found`);
+    console.log(`[SEND ERROR] Match ${matchId} not found (available: ${Array.from(matches.keys()).join(', ')})`);
     return res.status(404).json({ error: 'Match not found' });
   }
   
@@ -221,6 +221,9 @@ function handleSend(userId, data, res) {
   
   const partnerId = match.p1 === userId ? match.p2 : match.p1;
   
+  // Update activity timestamp
+  match.lastActivity = Date.now();
+  
   // Add signal to partner's queue
   match.signals[partnerId] = match.signals[partnerId] || [];
   match.signals[partnerId].push({ 
@@ -230,14 +233,27 @@ function handleSend(userId, data, res) {
     ts: Date.now() 
   });
   
+  // Track ICE candidates
+  if (type === 'ice-candidate') {
+    match.iceCount = (match.iceCount || 0) + 1;
+  }
+  
   // Limit signals to prevent memory bloat
-  if (match.signals[partnerId].length > 20) {
-    match.signals[partnerId] = match.signals[partnerId].slice(-20);
+  if (match.signals[partnerId].length > 50) {
+    match.signals[partnerId] = match.signals[partnerId].slice(-50);
   }
   
   // Update match status if ready signal
   if (type === 'ready') {
     match.status = 'connected';
+    // Schedule cleanup for successful connections (but keep longer)
+    if (!match.cleanup) {
+      match.cleanup = true;
+      setTimeout(() => {
+        console.log(`[CLEANUP] Removing connected match ${matchId} after success`);
+        matches.delete(matchId);
+      }, 300000); // 5 minutes after connection success
+    }
   }
   
   // Get my pending signals
@@ -246,16 +262,7 @@ function handleSend(userId, data, res) {
   
   const ready = mySignals.some(s => s.type === 'ready') || match.status === 'connected';
   
-  // Schedule cleanup for successful connections
-  if (ready && !match.cleanup) {
-    match.cleanup = true;
-    setTimeout(() => {
-      console.log(`[CLEANUP] Removing connected match ${matchId}`);
-      matches.delete(matchId);
-    }, 60000);
-  }
-  
-  console.log(`[SEND] ${userId} -> ${partnerId} (${type}), ready: ${ready}`);
+  console.log(`[SEND] ${userId} -> ${partnerId} (${type}), ready: ${ready}, ICE count: ${match.iceCount}, age: ${Date.now() - match.ts}ms`);
   
   return res.json({
     status: ready ? 'connected' : 'sent',
@@ -263,6 +270,8 @@ function handleSend(userId, data, res) {
     partnerId,
     signals: mySignals,
     connectionReady: ready,
+    matchAge: Date.now() - match.ts,
+    iceCount: match.iceCount,
     timestamp: Date.now()
   });
 }
@@ -276,7 +285,7 @@ function handleDisconnect(userId, res) {
   // Remove from matches
   for (const [matchId, match] of matches.entries()) {
     if (match.p1 === userId || match.p2 === userId) {
-      console.log(`[DISCONNECT] Removing match ${matchId}`);
+      console.log(`[DISCONNECT] Removing match ${matchId} (age: ${Date.now() - match.ts}ms)`);
       matches.delete(matchId);
       break;
     }
@@ -289,7 +298,7 @@ function handleDisconnect(userId, res) {
 }
 
 // ==========================================
-// CLEANUP
+// IMPROVED CLEANUP
 // ==========================================
 
 function cleanup() {
@@ -297,15 +306,34 @@ function cleanup() {
   let cleaned = 0;
 
   for (const [matchId, match] of matches.entries()) {
-    // Giữ match ít nhất 60 giây sau khi tạo
-    if (now - match.ts > 180000) {
-      console.log(`[CLEANUP] Removing match ${matchId} (age=${now - match.ts}ms)`);
+    const age = now - match.ts;
+    const timeSinceActivity = now - (match.lastActivity || match.ts);
+    
+    // Keep matches alive longer, especially if there's recent activity
+    let shouldCleanup = false;
+    
+    if (match.status === 'connected' && match.cleanup) {
+      // Already marked for cleanup after connection success
+      continue;
+    } else if (age > MATCH_TIMEOUT) {
+      // Very old matches
+      shouldCleanup = true;
+    } else if (age > MIN_MATCH_LIFETIME && timeSinceActivity > 60000) {
+      // Old matches with no recent activity
+      shouldCleanup = true;
+    } else if (age > MIN_MATCH_LIFETIME && (match.iceCount || 0) === 0) {
+      // Old matches with no ICE candidates (likely stuck)
+      shouldCleanup = true;
+    }
+    
+    if (shouldCleanup) {
+      console.log(`[CLEANUP] Removing match ${matchId} - age: ${age}ms, inactive: ${timeSinceActivity}ms, ICE: ${match.iceCount || 0}`);
       matches.delete(matchId);
       cleaned++;
     }
   }
 
   if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} expired matches. Active matches now: ${matches.size}`);
+    console.log(`[CLEANUP] Removed ${cleaned} expired matches. Active matches: ${matches.size}`);
   }
 }
