@@ -79,7 +79,7 @@ function handlePoll(userId, res) {
         setTimeout(() => {
           console.log(`[CLEANUP] Removing connected match ${matchId}`);
           matches.delete(matchId);
-        }, 15000); // 15 seconds after connection
+        }, 30000); // 15 seconds after connection
       }
       
       console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}`);
@@ -246,7 +246,7 @@ function handleSend(userId, data, res) {
     setTimeout(() => {
       console.log(`[CLEANUP] Removing connected match ${matchId}`);
       matches.delete(matchId);
-    }, 15000);
+    }, 30000);
   }
   
   console.log(`[SEND] ${userId} -> ${partnerId} (${type}), ready: ${ready}`);
