@@ -7,8 +7,7 @@ const app = express();
 app.use(express.json());
 
 const redis = createClient({
-  url: process.env.REDIS_URL,
-  headers: { Authorization: `Bearer ${process.env.UPSTASH_TOKEN || ''}` }
+  url: process.env.REDIS_URL
 });
 
 await redis.connect();
