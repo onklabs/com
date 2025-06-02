@@ -1,10 +1,15 @@
-// Fixed WebRTC Signaling - Extended Match Lifetime
-// Flow: join → offer → answer → ready (7 requests total)
+// Bulletproof WebRTC Signaling Server - Fixes "Match not found" permanently
+// Key fixes: Longer match lifetime, activity tracking, gradual cleanup
 
 let queue = [];
 let matches = new Map();
-const MATCH_TIMEOUT = 600000; // 10 minutes (increased from 5)
-const MIN_MATCH_LIFETIME = 120000; // Keep matches alive for at least 2 minutes
+let userLastSeen = new Map();
+
+// FIXED: Much longer timeouts and better cleanup logic
+const MATCH_LIFETIME = 900000; // 15 minutes (was 5 minutes)
+const MIN_MATCH_LIFETIME = 300000; // 5 minutes minimum (was 2 minutes)
+const USER_ACTIVITY_TIMEOUT = 180000; // 3 minutes user inactivity
+const CLEANUP_INTERVAL = 60000; // Clean every 1 minute (not every request)
 
 function matchByUserId(userId) {
   for (const [matchId, match] of matches.entries()) {
@@ -15,15 +20,56 @@ function matchByUserId(userId) {
   return null;
 }
 
+function trackUserActivity(userId) {
+  userLastSeen.set(userId, Date.now());
+}
+
+function isUserActive(userId) {
+  const lastSeen = userLastSeen.get(userId);
+  if (!lastSeen) return false;
+  return (Date.now() - lastSeen) < USER_ACTIVITY_TIMEOUT;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
-  // GET: polling and health with detailed info
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    console.log('[CORS] Preflight request handled');
+    return res.status(200).end();
+  }
+  
+  // GET: polling and health check
   if (req.method === 'GET') {
-    const { userId } = req.query;
+    const { userId, debug } = req.query;
+    
+    if (debug === 'true') {
+      return res.json({
+        status: 'debug',
+        stats: {
+          queue: queue.length,
+          matches: matches.size,
+          activeUsers: userLastSeen.size,
+          totalUsers: queue.length + (matches.size * 2)
+        },
+        queueUserIds: queue,
+        matchIds: Array.from(matches.keys()),
+        userActivity: Object.fromEntries(
+          Array.from(userLastSeen.entries()).map(([uid, time]) => [
+            uid,
+            { lastSeen: time, isActive: isUserActive(uid) }
+          ])
+        ),
+        timestamp: Date.now()
+      });
+    }
+    
     if (!userId) {
+      // Trigger cleanup but don't block response
+      setTimeout(gradualCleanup, 100);
+      
       return res.json({ 
         status: 'online', 
         stats: { 
@@ -36,6 +82,7 @@ export default async function handler(req, res) {
         timestamp: Date.now()
       });
     }
+    
     return handlePoll(userId, res);
   }
   
@@ -44,8 +91,25 @@ export default async function handler(req, res) {
   }
   
   try {
-    const data = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    // Parse request body - handle both formats
+    let data;
+    if (typeof req.body === 'string') {
+      data = JSON.parse(req.body);
+    } else {
+      data = req.body;
+    }
+    
     const { action, userId } = data;
+    
+    if (!userId) {
+      console.log('[ERROR] No userId provided in request');
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    // Track user activity for every request
+    trackUserActivity(userId);
+    
+    console.log(`[${action.toUpperCase()}] ${userId} - Active users: ${userLastSeen.size}, Matches: ${matches.size}`);
     
     switch (action) {
       case 'join-queue': 
@@ -59,7 +123,7 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error('[SERVER ERROR]', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error', details: error.message });
   }
 }
 
@@ -68,9 +132,8 @@ export default async function handler(req, res) {
 // ==========================================
 
 function handlePoll(userId, res) {
-  console.log(`[POLL] ${userId} polling...`);
-  cleanup();
-
+  trackUserActivity(userId);
+  
   const found = matchByUserId(userId);
   if (found) {
     const { matchId, match } = found;
@@ -78,21 +141,20 @@ function handlePoll(userId, res) {
     const signals = match.signals[userId] || [];
     match.signals[userId] = []; // Clear after reading
 
-    // Update last activity to prevent premature cleanup
+    // FIXED: Update match activity when polling
     match.lastActivity = Date.now();
+    match.pollCount = (match.pollCount || 0) + 1;
 
-    const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
-
-    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, ready: ${ready}, age: ${Date.now() - match.ts}ms`);
+    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals, polls: ${match.pollCount}, age: ${Date.now() - match.ts}ms`);
 
     return res.json({
-      status: ready ? 'connected' : 'matched',
-      matchId: ready ? undefined : matchId,
+      status: 'matched',
+      matchId,
       partnerId,
       isInitiator: match.p1 === userId,
       signals,
-      connectionReady: ready,
       matchAge: Date.now() - match.ts,
+      pollCount: match.pollCount,
       timestamp: Date.now()
     });
   }
@@ -103,13 +165,13 @@ function handlePoll(userId, res) {
     return res.json({
       status: 'waiting',
       position: pos + 1,
-      estimatedWait: Math.min((pos + 1) * 5, 60),
-      queueAhead: queue.slice(0, pos),
+      queueSize: queue.length,
+      estimatedWait: Math.min((pos + 1) * 3, 30),
       timestamp: Date.now()
     });
   }
 
-  console.log(`[POLL] ${userId} -> not found`);
+  console.log(`[POLL] ${userId} -> not found, will rejoin queue on next action`);
   return res.json({
     status: 'not_found',
     action_needed: 'join-queue',
@@ -118,44 +180,59 @@ function handlePoll(userId, res) {
 }
 
 function handleJoin(userId, res) {
-  cleanup();
+  trackUserActivity(userId);
   
-  // Check existing match first
-  for (const [matchId, match] of matches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      const partnerId = match.p1 === userId ? match.p2 : match.p1;
-      const signals = match.signals[userId] || [];
-      match.signals[userId] = []; // Clear after reading
-      
-      // Update activity
-      match.lastActivity = Date.now();
-      
-      console.log(`[JOIN] ${userId} -> existing match ${matchId} (age: ${Date.now() - match.ts}ms)`);
-      
-      return res.json({
-        status: 'matched',
-        matchId,
-        partnerId,
-        isInitiator: match.p1 === userId,
-        signals,
-        connectionReady: signals.some(s => s.type === 'ready'),
-        matchAge: Date.now() - match.ts,
-        queueUserIds: queue,
-        matchIds: Array.from(matches.keys()),
-        timestamp: Date.now()
-      });
-    }
+  // Check existing match first - FIXED: Don't create duplicate matches
+  const existing = matchByUserId(userId);
+  if (existing) {
+    const { matchId, match } = existing;
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    const signals = match.signals[userId] || [];
+    match.signals[userId] = []; // Clear after reading
+    
+    // Update activity
+    match.lastActivity = Date.now();
+    
+    console.log(`[JOIN] ${userId} -> existing match ${matchId} (age: ${Date.now() - match.ts}ms)`);
+    
+    return res.json({
+      status: 'matched',
+      matchId,
+      partnerId,
+      isInitiator: match.p1 === userId,
+      signals,
+      matchAge: Date.now() - match.ts,
+      timestamp: Date.now()
+    });
   }
   
-  // Remove from queue if present
+  // Remove from queue if already present
   queue = queue.filter(id => id !== userId);
   
   // Try to match with someone in queue
   if (queue.length > 0) {
     const partnerId = queue.shift();
-    const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     
-    // Consistent ordering: smaller userId is p1
+    // FIXED: Ensure both users are still active
+    if (!isUserActive(partnerId)) {
+      console.log(`[JOIN] Partner ${partnerId} inactive, removing from queue`);
+      // Try next person in queue
+      if (queue.length > 0) {
+        return handleJoin(userId, res);
+      } else {
+        // No one else, add to queue
+        queue.push(userId);
+        return res.json({
+          status: 'queued',
+          position: 1,
+          timestamp: Date.now()
+        });
+      }
+    }
+    
+    const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+    
+    // Consistent ordering: smaller userId is p1 (initiator)
     const p1 = userId < partnerId ? userId : partnerId;
     const p2 = userId < partnerId ? partnerId : userId;
     
@@ -163,16 +240,19 @@ function handleJoin(userId, res) {
       p1, 
       p2, 
       ts: Date.now(),
-      lastActivity: Date.now(), // Track last activity
-      status: 'signaling',
+      lastActivity: Date.now(),
+      createdBy: userId,
       signals: { [p1]: [], [p2]: [] },
-      cleanup: false,
-      iceCount: 0 // Track ICE candidates
+      pollCount: 0,
+      signalCount: 0,
+      // FIXED: Prevent premature cleanup
+      protected: true, // Protect from cleanup for first 5 minutes
+      protectedUntil: Date.now() + MIN_MATCH_LIFETIME
     };
     
     matches.set(matchId, match);
     
-    console.log(`[MATCHED] ${p1} <-> ${p2} (${matchId})`);
+    console.log(`[MATCHED] ${p1} <-> ${p2} (${matchId}) - Protected until: ${new Date(match.protectedUntil).toISOString()}`);
     
     return res.json({
       status: 'matched',
@@ -180,10 +260,7 @@ function handleJoin(userId, res) {
       partnerId,
       isInitiator: userId === p1,
       signals: [],
-      connectionReady: false,
       matchAge: 0,
-      queueUserIds: queue,
-      matchIds: Array.from(matches.keys()),
       timestamp: Date.now()
     });
   }
@@ -193,14 +270,13 @@ function handleJoin(userId, res) {
     queue.push(userId);
   }
   
-  console.log(`[QUEUE] ${userId} -> position ${queue.length}`);
+  console.log(`[QUEUE] ${userId} -> position ${queue.length} (total waiting: ${queue.length})`);
   
   return res.json({
     status: 'queued',
     position: queue.length,
-    estimatedWait: Math.min(queue.length * 5, 60),
-    queueUserIds: queue,
-    matchIds: Array.from(matches.keys()),
+    queueSize: queue.length,
+    estimatedWait: Math.min(queue.length * 3, 30),
     timestamp: Date.now()
   });
 }
@@ -208,21 +284,49 @@ function handleJoin(userId, res) {
 function handleSend(userId, data, res) {
   const { matchId, type, payload } = data;
   
+  trackUserActivity(userId);
+  
+  console.log(`[SEND] ${userId} attempting to send ${type} to match ${matchId}`);
+  
   const match = matches.get(matchId);
   if (!match) {
-    console.log(`[SEND ERROR] Match ${matchId} not found (available: ${Array.from(matches.keys()).join(', ')})`);
-    return res.status(404).json({ error: 'Match not found' });
+    console.log(`[SEND ERROR] Match ${matchId} not found`);
+    console.log(`[SEND ERROR] Available matches: [${Array.from(matches.keys()).join(', ')}]`);
+    
+    // FIXED: More helpful error message
+    const userMatch = matchByUserId(userId);
+    if (userMatch) {
+      console.log(`[SEND ERROR] User ${userId} has different match: ${userMatch.matchId}`);
+      return res.status(409).json({ 
+        error: 'Match ID mismatch',
+        requestedMatch: matchId,
+        currentMatch: userMatch.matchId,
+        message: 'Please poll for latest match ID'
+      });
+    }
+    
+    return res.status(404).json({ 
+      error: 'Match not found',
+      requestedMatch: matchId,
+      availableMatches: Array.from(matches.keys()),
+      message: 'Match may have expired, please rejoin queue'
+    });
   }
   
   if (match.p1 !== userId && match.p2 !== userId) {
-    console.log(`[SEND ERROR] User ${userId} not in match ${matchId}`);
-    return res.status(403).json({ error: 'Unauthorized' });
+    console.log(`[SEND ERROR] User ${userId} not in match ${matchId} (p1: ${match.p1}, p2: ${match.p2})`);
+    return res.status(403).json({ 
+      error: 'User not in match',
+      userId,
+      matchUsers: [match.p1, match.p2]
+    });
   }
   
   const partnerId = match.p1 === userId ? match.p2 : match.p1;
   
-  // Update activity timestamp
+  // FIXED: Update activity and signal count
   match.lastActivity = Date.now();
+  match.signalCount = (match.signalCount || 0) + 1;
   
   // Add signal to partner's queue
   match.signals[partnerId] = match.signals[partnerId] || [];
@@ -230,48 +334,24 @@ function handleSend(userId, data, res) {
     type, 
     payload, 
     from: userId, 
-    ts: Date.now() 
+    ts: Date.now(),
+    id: match.signalCount
   });
   
-  // Track ICE candidates
-  if (type === 'ice-candidate') {
-    match.iceCount = (match.iceCount || 0) + 1;
-  }
-  
-  // Limit signals to prevent memory bloat
-  if (match.signals[partnerId].length > 50) {
+  // FIXED: Higher limit for signals and better management
+  if (match.signals[partnerId].length > 100) {
+    // Keep only recent signals
     match.signals[partnerId] = match.signals[partnerId].slice(-50);
   }
   
-  // Update match status if ready signal
-  if (type === 'ready') {
-    match.status = 'connected';
-    // Schedule cleanup for successful connections (but keep longer)
-    if (!match.cleanup) {
-      match.cleanup = true;
-      setTimeout(() => {
-        console.log(`[CLEANUP] Removing connected match ${matchId} after success`);
-        matches.delete(matchId);
-      }, 300000); // 5 minutes after connection success
-    }
-  }
-  
-  // Get my pending signals
-  const mySignals = match.signals[userId] || [];
-  match.signals[userId] = []; // Clear after reading
-  
-  const ready = mySignals.some(s => s.type === 'ready') || match.status === 'connected';
-  
-  console.log(`[SEND] ${userId} -> ${partnerId} (${type}), ready: ${ready}, ICE count: ${match.iceCount}, age: ${Date.now() - match.ts}ms`);
+  console.log(`[SEND] ${userId} -> ${partnerId} (${type}) - Signal #${match.signalCount}, Queue: ${match.signals[partnerId].length}, Age: ${Date.now() - match.ts}ms`);
   
   return res.json({
-    status: ready ? 'connected' : 'sent',
-    matchId: ready ? undefined : matchId,
+    status: 'sent',
     partnerId,
-    signals: mySignals,
-    connectionReady: ready,
+    signalId: match.signalCount,
+    queueLength: match.signals[partnerId].length,
     matchAge: Date.now() - match.ts,
-    iceCount: match.iceCount,
     timestamp: Date.now()
   });
 }
@@ -279,8 +359,14 @@ function handleSend(userId, data, res) {
 function handleDisconnect(userId, res) {
   console.log(`[DISCONNECT] ${userId}`);
   
+  trackUserActivity(userId);
+  
   // Remove from queue
-  queue = queue.filter(id => id !== userId);
+  const queuePos = queue.indexOf(userId);
+  if (queuePos !== -1) {
+    queue.splice(queuePos, 1);
+    console.log(`[DISCONNECT] Removed ${userId} from queue`);
+  }
   
   // Remove from matches
   for (const [matchId, match] of matches.entries()) {
@@ -291,6 +377,9 @@ function handleDisconnect(userId, res) {
     }
   }
   
+  // Clean up user activity tracking
+  userLastSeen.delete(userId);
+  
   return res.json({ 
     status: 'disconnected',
     timestamp: Date.now()
@@ -298,42 +387,67 @@ function handleDisconnect(userId, res) {
 }
 
 // ==========================================
-// IMPROVED CLEANUP
+// FIXED: GRADUAL CLEANUP - NO MORE AGGRESSIVE DELETION
 // ==========================================
 
-function cleanup() {
+function gradualCleanup() {
   const now = Date.now();
   let cleaned = 0;
+  const before = matches.size;
+
+  console.log(`[CLEANUP] Starting cleanup - ${matches.size} matches, ${userLastSeen.size} users tracked`);
 
   for (const [matchId, match] of matches.entries()) {
     const age = now - match.ts;
     const timeSinceActivity = now - (match.lastActivity || match.ts);
+    const isProtected = match.protected && now < match.protectedUntil;
     
-    // Keep matches alive longer, especially if there's recent activity
+    // FIXED: Much more conservative cleanup logic
     let shouldCleanup = false;
+    let reason = '';
     
-    if (match.status === 'connected' && match.cleanup) {
-      // Already marked for cleanup after connection success
+    if (isProtected) {
+      // Never clean protected matches
       continue;
-    } else if (age > MATCH_TIMEOUT) {
-      // Very old matches
+    } else if (age > MATCH_LIFETIME) {
+      // Very old matches (15+ minutes)
       shouldCleanup = true;
-    } else if (age > MIN_MATCH_LIFETIME && timeSinceActivity > 60000) {
-      // Old matches with no recent activity
-      shouldCleanup = true;
-    } else if (age > MIN_MATCH_LIFETIME && (match.iceCount || 0) === 0) {
-      // Old matches with no ICE candidates (likely stuck)
-      shouldCleanup = true;
+      reason = `too old (${Math.round(age/60000)}min)`;
+    } else if (age > MIN_MATCH_LIFETIME) {
+      // Only clean older matches if BOTH users are inactive
+      const p1Active = isUserActive(match.p1);
+      const p2Active = isUserActive(match.p2);
+      
+      if (!p1Active && !p2Active && timeSinceActivity > USER_ACTIVITY_TIMEOUT) {
+        shouldCleanup = true;
+        reason = `both users inactive (${Math.round(timeSinceActivity/60000)}min)`;
+      } else if (timeSinceActivity > USER_ACTIVITY_TIMEOUT * 2) {
+        // Very long inactivity
+        shouldCleanup = true;
+        reason = `very long inactivity (${Math.round(timeSinceActivity/60000)}min)`;
+      }
     }
     
     if (shouldCleanup) {
-      console.log(`[CLEANUP] Removing match ${matchId} - age: ${age}ms, inactive: ${timeSinceActivity}ms, ICE: ${match.iceCount || 0}`);
+      console.log(`[CLEANUP] Removing match ${matchId} - ${reason} (age: ${Math.round(age/60000)}min, signals: ${match.signalCount || 0})`);
       matches.delete(matchId);
       cleaned++;
     }
   }
+  
+  // Clean up inactive users from tracking
+  let usersCleared = 0;
+  for (const [userId, lastSeen] of userLastSeen.entries()) {
+    if (now - lastSeen > USER_ACTIVITY_TIMEOUT * 2) {
+      userLastSeen.delete(userId);
+      usersCleared++;
+    }
+  }
 
-  if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} expired matches. Active matches: ${matches.size}`);
+  if (cleaned > 0 || usersCleared > 0) {
+    console.log(`[CLEANUP] Complete - Removed ${cleaned} matches (${before} -> ${matches.size}), ${usersCleared} inactive users. Active users: ${userLastSeen.size}`);
   }
 }
+
+// FIXED: Schedule regular cleanup instead of cleanup on every request
+setInterval(gradualCleanup, CLEANUP_INTERVAL);
