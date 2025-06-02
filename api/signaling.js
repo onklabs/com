@@ -1,12 +1,17 @@
-// Vercel KV Compatible: Basic Redis Operations Only
-// Target: 83-91% matching success rate
+// Vercel KV Optimized: Reduced Redis Operations
+// Target: 95%+ matching success rate with timeout prevention
 
 import { kv } from '@vercel/kv';
 
-const MATCH_TIMEOUT = 300000;
-const CLEANUP_TIMEOUT = 15000;
+const MATCH_TIMEOUT = 180000; // Reduced timeout
+const CLEANUP_TIMEOUT = 10000; // Faster cleanup
+const MAX_SIGNALS = 10; // Reduced signal buffer
+const BATCH_SIZE = 5; // For batch operations
 
 export default async function handler(req, res) {
+  // Set shorter timeout for Vercel
+  res.setTimeout(25000);
+  
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -14,10 +19,10 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     const { userId } = req.query;
     if (!userId) {
-      const stats = await getStats();
+      const stats = await getStatsOptimized();
       return res.json({ status: 'online', stats });
     }
-    return handlePoll(userId, res);
+    return handlePollOptimized(userId, res);
   }
   
   if (req.method !== 'POST') {
@@ -31,9 +36,9 @@ export default async function handler(req, res) {
     if (!userId) return res.status(400).json({ error: 'Missing userId' });
     
     switch (action) {
-      case 'join-queue': return handleJoin(userId, res);
-      case 'send-signal': return handleSend(userId, data, res);
-      case 'disconnect': return handleDisconnect(userId, res);
+      case 'join-queue': return handleJoinOptimized(userId, res);
+      case 'send-signal': return handleSendOptimized(userId, data, res);
+      case 'disconnect': return handleDisconnectOptimized(userId, res);
       default: return res.status(400).json({ error: 'Unknown action' });
     }
   } catch (error) {
@@ -42,269 +47,373 @@ export default async function handler(req, res) {
   }
 }
 
-async function handlePoll(userId, res) {
-  await cleanup();
-  
-  // Check active match
-  const userMatch = await kv.hget('user_matches', userId);
-  
-  if (userMatch) {
-    const match = await kv.hget('matches', userMatch);
-    const signals = await kv.lrange(`signals:${userMatch}:${userId}`, 0, -1);
+async function handlePollOptimized(userId, res) {
+  try {
+    // Single operation to get user match
+    const userMatch = await kv.hget('user_matches', userId);
     
-    if (match) {
-      const matchData = JSON.parse(match);
-      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+    if (userMatch) {
+      // Batch get match data and signals
+      const [matchData, signalData] = await Promise.all([
+        kv.hget('matches', userMatch),
+        kv.get(`signals:${userMatch}:${userId}`)
+      ]);
       
-      // Clear signals if any exist
-      if (signals && signals.length > 0) {
-        await kv.del(`signals:${userMatch}:${userId}`);
+      if (matchData) {
+        const match = JSON.parse(matchData);
+        const partnerId = match.p1 === userId ? match.p2 : match.p1;
+        
+        let signals = [];
+        if (signalData) {
+          signals = JSON.parse(signalData);
+          // Clear signals immediately
+          await kv.del(`signals:${userMatch}:${userId}`);
+        }
+        
+        const ready = signals.some(s => s.type === 'ready') || match.status === 'connected';
+        
+        // Schedule cleanup without blocking
+        if (ready && !match.cleanupScheduled) {
+          match.cleanupScheduled = true;
+          await kv.hset('matches', userMatch, JSON.stringify(match));
+          
+          // Non-blocking cleanup
+          setTimeout(() => {
+            cleanupMatchOptimized(userMatch).catch(console.error);
+          }, CLEANUP_TIMEOUT);
+        }
+        
+        return res.json({
+          status: ready ? 'connected' : 'matched',
+          matchId: ready ? undefined : userMatch,
+          partnerId,
+          isInitiator: match.p1 === userId,
+          signals,
+          connectionReady: ready
+        });
+      } else {
+        // Clean stale user match
+        await kv.hdel('user_matches', userId);
       }
-      
-      const parsedSignals = signals ? signals.map(s => JSON.parse(s)) : [];
-      const ready = parsedSignals.some(s => s.type === 'ready') || matchData.status === 'connected';
-      
-      // Protective cleanup scheduling
-      if (ready && !matchData.cleanup) {
-        matchData.cleanup = true;
-        await kv.hset('matches', userMatch, JSON.stringify(matchData));
-        setTimeout(async () => {
-          await cleanupMatch(userMatch);
-        }, CLEANUP_TIMEOUT);
-      }
-      
-      return res.json({
-        status: ready ? 'connected' : 'matched',
-        matchId: ready ? undefined : userMatch,
-        partnerId,
-        isInitiator: matchData.p1 === userId,
-        signals: parsedSignals,
-        connectionReady: ready
-      });
-    } else {
-      await kv.hdel('user_matches', userId);
     }
+    
+    // Check queue with single operation
+    const queueData = await kv.get('queue_set');
+    if (queueData) {
+      const queueSet = JSON.parse(queueData);
+      const userIndex = queueSet.users.indexOf(userId);
+      
+      if (userIndex !== -1) {
+        return res.json({
+          status: 'waiting',
+          position: userIndex + 1,
+          estimatedWait: Math.min((userIndex + 1) * 3, 45)
+        });
+      }
+    }
+    
+    return res.json({ status: 'not_found', action_needed: 'join-queue' });
+    
+  } catch (error) {
+    console.error('[POLL ERROR]', error);
+    return res.status(500).json({ error: 'Poll failed' });
   }
-  
-  // Check queue position (simple list approach)
-  const queue = await kv.get('queue') || '[]';
-  const queueList = JSON.parse(queue);
-  const pos = queueList.findIndex(id => id === userId);
-  
-  if (pos !== -1) {
-    return res.json({
-      status: 'waiting',
-      position: pos + 1,
-      estimatedWait: Math.min((pos + 1) * 5, 60)
-    });
-  }
-  
-  return res.json({ status: 'not_found', action_needed: 'join-queue' });
 }
 
-async function handleJoin(userId, res) {
-  await cleanup();
-  
-  // Check existing match
-  const existingMatch = await kv.hget('user_matches', userId);
-  if (existingMatch) {
-    const match = await kv.hget('matches', existingMatch);
-    if (match) {
-      const matchData = JSON.parse(match);
-      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-      
-      const signals = await kv.lrange(`signals:${existingMatch}:${userId}`, 0, -1);
-      if (signals.length > 0) {
-        await kv.del(`signals:${existingMatch}:${userId}`);
+async function handleJoinOptimized(userId, res) {
+  try {
+    // Check existing match first
+    const existingMatch = await kv.hget('user_matches', userId);
+    if (existingMatch) {
+      const matchData = await kv.hget('matches', existingMatch);
+      if (matchData) {
+        const match = JSON.parse(matchData);
+        const partnerId = match.p1 === userId ? match.p2 : match.p1;
+        
+        // Get and clear signals
+        const signalData = await kv.get(`signals:${existingMatch}:${userId}`);
+        let signals = [];
+        if (signalData) {
+          signals = JSON.parse(signalData);
+          await kv.del(`signals:${existingMatch}:${userId}`);
+        }
+        
+        return res.json({
+          status: 'matched',
+          matchId: existingMatch,
+          partnerId,
+          isInitiator: match.p1 === userId,
+          signals,
+          connectionReady: signals.some(s => s.type === 'ready')
+        });
+      } else {
+        await kv.hdel('user_matches', userId);
       }
+    }
+    
+    // Optimized queue management
+    const queueData = await kv.get('queue_set') || '{"users":[],"timestamp":0}';
+    const queueSet = JSON.parse(queueData);
+    
+    // Remove user if already in queue
+    queueSet.users = queueSet.users.filter(id => id !== userId);
+    
+    // Try to match immediately
+    if (queueSet.users.length > 0) {
+      const partnerId = queueSet.users.shift();
       
-      const parsedSignals = signals.map(s => JSON.parse(s));
+      // Update queue
+      queueSet.timestamp = Date.now();
+      await kv.set('queue_set', JSON.stringify(queueSet));
+      
+      // Create match
+      const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+      const p1 = userId < partnerId ? userId : partnerId;
+      const p2 = userId < partnerId ? partnerId : userId;
+      
+      const matchData = {
+        p1, p2, 
+        ts: Date.now(),
+        status: 'signaling',
+        cleanupScheduled: false
+      };
+      
+      // Batch create match
+      await Promise.all([
+        kv.hset('matches', matchId, JSON.stringify(matchData)),
+        kv.hset('user_matches', p1, matchId),
+        kv.hset('user_matches', p2, matchId)
+      ]);
+      
+      console.log(`[MATCHED] ${p1} <-> ${p2} (${matchId})`);
       
       return res.json({
         status: 'matched',
-        matchId: existingMatch,
+        matchId,
         partnerId,
-        isInitiator: matchData.p1 === userId,
-        signals: parsedSignals,
-        connectionReady: parsedSignals.some(s => s.type === 'ready')
+        isInitiator: userId === p1,
+        signals: [],
+        connectionReady: false
       });
-    } else {
-      await kv.hdel('user_matches', userId);
     }
-  }
-  
-  // Get current queue and clean user
-  const currentQueue = await kv.get('queue') || '[]';
-  let queueList = JSON.parse(currentQueue);
-  queueList = queueList.filter(id => id !== userId);
-  
-  // Try to match with first person
-  if (queueList.length > 0) {
-    const partnerId = queueList.shift(); // Remove first user
-    await kv.set('queue', JSON.stringify(queueList)); // Update queue
     
-    const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    const p1 = userId < partnerId ? userId : partnerId;
-    const p2 = userId < partnerId ? partnerId : userId;
+    // Add to queue
+    queueSet.users.push(userId);
+    queueSet.timestamp = Date.now();
+    await kv.set('queue_set', JSON.stringify(queueSet));
     
-    const matchData = {
-      p1, p2, 
-      ts: Date.now(),
-      status: 'signaling'
-    };
-    
-    // Store match and user mappings
-    await kv.hset('matches', matchId, JSON.stringify(matchData));
-    await kv.hset('user_matches', p1, matchId);
-    await kv.hset('user_matches', p2, matchId);
-    
-    console.log(`[MATCHED] ${p1} <-> ${p2} (${matchId})`);
+    console.log(`[QUEUED] ${userId} (position ${queueSet.users.length})`);
     
     return res.json({
-      status: 'matched',
-      matchId,
-      partnerId,
-      isInitiator: userId === p1,
-      signals: [],
-      connectionReady: false
+      status: 'queued',
+      position: queueSet.users.length,
+      estimatedWait: Math.min(queueSet.users.length * 3, 45)
     });
-  }
-  
-  // Add to queue
-  queueList.push(userId);
-  await kv.set('queue', JSON.stringify(queueList));
-  
-  console.log(`[QUEUED] ${userId} (position ${queueList.length})`);
-  
-  return res.json({
-    status: 'queued',
-    position: queueList.length,
-    estimatedWait: Math.min(queueList.length * 5, 60)
-  });
-}
-
-async function handleSend(userId, data, res) {
-  const { matchId, type, payload } = data;
-  
-  const match = await kv.hget('matches', matchId);
-  if (!match) return res.status(404).json({ error: 'Match not found' });
-  
-  const matchData = JSON.parse(match);
-  if (matchData.p1 !== userId && matchData.p2 !== userId) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-  
-  const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-  const signal = JSON.stringify({ type, payload, from: userId, ts: Date.now() });
-  
-  // Add signal to partner's list
-  await kv.rpush(`signals:${matchId}:${partnerId}`, signal);
-  
-  // Manually limit to last 20 signals
-  const partnerSignals = await kv.lrange(`signals:${matchId}:${partnerId}`, 0, -1);
-  if (partnerSignals.length > 20) {
-    await kv.del(`signals:${matchId}:${partnerId}`);
-    // Keep only last 20
-    const limited = partnerSignals.slice(-20);
-    for (const s of limited) {
-      await kv.rpush(`signals:${matchId}:${partnerId}`, s);
-    }
-  }
-  
-  if (type === 'ready') {
-    matchData.status = 'connected';
-    await kv.hset('matches', matchId, JSON.stringify(matchData));
-  }
-  
-  // Get my signals
-  const mySignals = await kv.lrange(`signals:${matchId}:${userId}`, 0, -1);
-  
-  // Clear my signals
-  if (mySignals && mySignals.length > 0) {
-    await kv.del(`signals:${matchId}:${userId}`);
-  }
-  
-  const parsedSignals = mySignals ? mySignals.map(s => JSON.parse(s)) : [];
-  const ready = parsedSignals.some(s => s.type === 'ready') || matchData.status === 'connected';
-  
-  // Protective cleanup scheduling
-  if (ready && !matchData.cleanup) {
-    matchData.cleanup = true;
-    await kv.hset('matches', matchId, JSON.stringify(matchData));
-    setTimeout(async () => {
-      await cleanupMatch(matchId);
-    }, CLEANUP_TIMEOUT);
-  }
-  
-  console.log(`[SEND] ${userId} -> ${partnerId} (${type})`);
-  
-  return res.json({
-    status: ready ? 'connected' : 'sent',
-    matchId: ready ? undefined : matchId,
-    partnerId,
-    signals: parsedSignals,
-    connectionReady: ready
-  });
-}
-
-async function handleDisconnect(userId, res) {
-  // Clean from queue
-  const currentQueue = await kv.get('queue') || '[]';
-  const queueList = JSON.parse(currentQueue);
-  const filteredQueue = queueList.filter(id => id !== userId);
-  await kv.set('queue', JSON.stringify(filteredQueue));
-  
-  // Clean from matches
-  const matchId = await kv.hget('user_matches', userId);
-  if (matchId) {
-    await cleanupMatch(matchId);
-  }
-  
-  console.log(`[DISCONNECT] ${userId}`);
-  return res.json({ status: 'disconnected' });
-}
-
-async function cleanup() {
-  const now = Date.now();
-  const matches = await kv.hgetall('matches');
-  
-  for (const [matchId, matchStr] of Object.entries(matches)) {
-    const match = JSON.parse(matchStr);
-    if (now - match.ts > MATCH_TIMEOUT) {
-      await cleanupMatch(matchId);
-    }
-  }
-}
-
-async function cleanupMatch(matchId) {
-  const match = await kv.hget('matches', matchId);
-  if (match) {
-    const matchData = JSON.parse(match);
     
-    // Clean all related data
-    await kv.hdel('matches', matchId);
-    await kv.hdel('user_matches', matchData.p1);
-    await kv.hdel('user_matches', matchData.p2);
-    await kv.del(`signals:${matchId}:${matchData.p1}`);
-    await kv.del(`signals:${matchId}:${matchData.p2}`);
+  } catch (error) {
+    console.error('[JOIN ERROR]', error);
+    return res.status(500).json({ error: 'Join failed' });
+  }
+}
+
+async function handleSendOptimized(userId, data, res) {
+  try {
+    const { matchId, type, payload } = data;
+    
+    const matchData = await kv.hget('matches', matchId);
+    if (!matchData) return res.status(404).json({ error: 'Match not found' });
+    
+    const match = JSON.parse(matchData);
+    if (match.p1 !== userId && match.p2 !== userId) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    const signal = { type, payload, from: userId, ts: Date.now() };
+    
+    // Optimized signal storage - use JSON array instead of Redis list
+    const partnerSignalKey = `signals:${matchId}:${partnerId}`;
+    const currentSignals = await kv.get(partnerSignalKey);
+    
+    let signalArray = currentSignals ? JSON.parse(currentSignals) : [];
+    signalArray.push(signal);
+    
+    // Keep only last MAX_SIGNALS
+    if (signalArray.length > MAX_SIGNALS) {
+      signalArray = signalArray.slice(-MAX_SIGNALS);
+    }
+    
+    // Single write operation
+    await kv.set(partnerSignalKey, JSON.stringify(signalArray));
+    
+    if (type === 'ready') {
+      match.status = 'connected';
+      await kv.hset('matches', matchId, JSON.stringify(match));
+    }
+    
+    // Get my signals
+    const mySignalKey = `signals:${matchId}:${userId}`;
+    const mySignalData = await kv.get(mySignalKey);
+    let mySignals = [];
+    
+    if (mySignalData) {
+      mySignals = JSON.parse(mySignalData);
+      await kv.del(mySignalKey);
+    }
+    
+    const ready = mySignals.some(s => s.type === 'ready') || match.status === 'connected';
+    
+    // Non-blocking cleanup scheduling
+    if (ready && !match.cleanupScheduled) {
+      match.cleanupScheduled = true;
+      await kv.hset('matches', matchId, JSON.stringify(match));
+      
+      setTimeout(() => {
+        cleanupMatchOptimized(matchId).catch(console.error);
+      }, CLEANUP_TIMEOUT);
+    }
+    
+    console.log(`[SEND] ${userId} -> ${partnerId} (${type})`);
+    
+    return res.json({
+      status: ready ? 'connected' : 'sent',
+      matchId: ready ? undefined : matchId,
+      partnerId,
+      signals: mySignals,
+      connectionReady: ready
+    });
+    
+  } catch (error) {
+    console.error('[SEND ERROR]', error);
+    return res.status(500).json({ error: 'Send failed' });
+  }
+}
+
+async function handleDisconnectOptimized(userId, res) {
+  try {
+    // Batch cleanup operations
+    const [matchId, queueData] = await Promise.all([
+      kv.hget('user_matches', userId),
+      kv.get('queue_set')
+    ]);
+    
+    const cleanupPromises = [];
     
     // Clean from queue
-    const currentQueue = await kv.get('queue') || '[]';
-    const queueList = JSON.parse(currentQueue);
-    const filteredQueue = queueList.filter(id => id !== matchData.p1 && id !== matchData.p2);
-    await kv.set('queue', JSON.stringify(filteredQueue));
+    if (queueData) {
+      const queueSet = JSON.parse(queueData);
+      queueSet.users = queueSet.users.filter(id => id !== userId);
+      queueSet.timestamp = Date.now();
+      cleanupPromises.push(kv.set('queue_set', JSON.stringify(queueSet)));
+    }
     
-    console.log(`[CLEANUP] Removed match ${matchId}`);
+    // Clean from matches
+    if (matchId) {
+      cleanupPromises.push(cleanupMatchOptimized(matchId));
+    }
+    
+    await Promise.all(cleanupPromises);
+    
+    console.log(`[DISCONNECT] ${userId}`);
+    return res.json({ status: 'disconnected' });
+    
+  } catch (error) {
+    console.error('[DISCONNECT ERROR]', error);
+    return res.status(500).json({ error: 'Disconnect failed' });
   }
 }
 
-async function getStats() {
-  const queue = await kv.get('queue') || '[]';
-  const queueList = JSON.parse(queue);
-  const matches = await kv.hgetall('matches');
-  
-  return {
-    waiting: queueList.length,
-    matches: Object.keys(matches).length
-  };
+async function cleanupMatchOptimized(matchId) {
+  try {
+    const matchData = await kv.hget('matches', matchId);
+    if (!matchData) return;
+    
+    const match = JSON.parse(matchData);
+    const now = Date.now();
+    
+    // Skip if match is too recent (prevent premature cleanup)
+    if (now - match.ts < CLEANUP_TIMEOUT) return;
+    
+    // Batch cleanup operations
+    await Promise.all([
+      kv.hdel('matches', matchId),
+      kv.hdel('user_matches', match.p1),
+      kv.hdel('user_matches', match.p2),
+      kv.del(`signals:${matchId}:${match.p1}`),
+      kv.del(`signals:${matchId}:${match.p2}`)
+    ]);
+    
+    // Clean from queue
+    const queueData = await kv.get('queue_set');
+    if (queueData) {
+      const queueSet = JSON.parse(queueData);
+      const originalLength = queueSet.users.length;
+      queueSet.users = queueSet.users.filter(id => id !== match.p1 && id !== match.p2);
+      
+      if (queueSet.users.length !== originalLength) {
+        queueSet.timestamp = Date.now();
+        await kv.set('queue_set', JSON.stringify(queueSet));
+      }
+    }
+    
+    console.log(`[CLEANUP] Removed match ${matchId}`);
+    
+  } catch (error) {
+    console.error('[CLEANUP ERROR]', error);
+  }
+}
+
+async function getStatsOptimized() {
+  try {
+    const [queueData, matchesData] = await Promise.all([
+      kv.get('queue_set'),
+      kv.hlen('matches')
+    ]);
+    
+    const queueSet = queueData ? JSON.parse(queueData) : { users: [] };
+    
+    return {
+      waiting: queueSet.users.length,
+      matches: matchesData || 0
+    };
+    
+  } catch (error) {
+    console.error('[STATS ERROR]', error);
+    return { waiting: 0, matches: 0 };
+  }
+}
+
+// Periodic cleanup function (call less frequently)
+async function performMaintenanceCleanup() {
+  try {
+    const now = Date.now();
+    const matches = await kv.hgetall('matches');
+    
+    const staleMatches = [];
+    for (const [matchId, matchStr] of Object.entries(matches)) {
+      const match = JSON.parse(matchStr);
+      if (now - match.ts > MATCH_TIMEOUT) {
+        staleMatches.push(matchId);
+      }
+    }
+    
+    // Batch cleanup stale matches
+    for (const matchId of staleMatches) {
+      await cleanupMatchOptimized(matchId);
+    }
+    
+    // Clean stale queue entries
+    const queueData = await kv.get('queue_set');
+    if (queueData) {
+      const queueSet = JSON.parse(queueData);
+      if (now - queueSet.timestamp > MATCH_TIMEOUT) {
+        queueSet.users = queueSet.users.slice(0, 50); // Limit queue size
+        queueSet.timestamp = now;
+        await kv.set('queue_set', JSON.stringify(queueSet));
+      }
+    }
+    
+  } catch (error) {
+    console.error('[MAINTENANCE ERROR]', error);
+  }
 }
