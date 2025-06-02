@@ -70,6 +70,7 @@ export default async function handler(req, res) {
 // ==========================================
 
 function handlePoll(userId, res) {
+  console.log(`[MATCH DEBUG] Active matches: ${matches.size}`);
   cleanup();
 
   const found = matchByUserId(userId);
@@ -297,14 +298,15 @@ function cleanup() {
   let cleaned = 0;
 
   for (const [matchId, match] of matches.entries()) {
-    // Giữ match ít nhất 10s sau khi tạo
-    if (now - match.ts > MATCH_TIMEOUT) {
+    // Giữ match ít nhất 60 giây sau khi tạo
+    if (now - match.ts > 180000) {
+      console.log(`[CLEANUP] Removing match ${matchId} (age=${now - match.ts}ms)`);
       matches.delete(matchId);
       cleaned++;
     }
   }
 
   if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} old matches. Active: queue=${queue.length}, matches=${matches.size}`);
+    console.log(`[CLEANUP] Removed ${cleaned} expired matches. Active matches now: ${matches.size}`);
   }
 }
