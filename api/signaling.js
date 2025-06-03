@@ -3,7 +3,7 @@ let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
 const USER_TIMEOUT = 120000; // 2 minutes for waiting users
 const MATCH_LIFETIME = 600000; // 10 minutes for active matches
-const MAX_WAITING_USERS = 120000; // Prevent memory bloat
+const MAX_WAITING_USERS = 1000; // Prevent memory bloat
 
 // Helper function for CORS responses
 function createCorsResponse(data, status = 200) {
@@ -355,11 +355,7 @@ function handleDisconnect(userId) {
       console.log(`[DISCONNECT] Removing match ${matchId}, notifying ${partnerId}`);
       
       // Remove match after a delay to let partner receive disconnect signal
-      setTimeout(() => {
-        activeMatches.delete(matchId);
-        console.log(`[DISCONNECT] Match ${matchId} cleaned up`);
-      }, 5000);
-      
+      activeMatches.delete(matchId);      
       removed = true;
       break;
     }
