@@ -166,7 +166,7 @@ export default async function handler(req) {
             case 'send-signal': 
                 return handleSendSignal(userId, data);                
             case 'p2p-connected': 
-                return handleP2Pconnected(userId, data);      
+                return handleP2pConnected(userId, data);      
             case 'disconnect': 
                 return handleDisconnect(userId);
             default: 
@@ -3049,7 +3049,7 @@ function handleSendSignal(userId, data) {
         timestamp: Date.now()
     });
 }
-function handleP2Pconnected(userId, data) {
+function handleP2pConnected(userId, data) {
     const { matchId, partnerId } = data;
     console.log(`[P2PConnected] ${matchId}`);
     
