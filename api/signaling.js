@@ -905,5 +905,5 @@ export default async function handler(req) {
     }
 }
 
-// Edge Runtime configuration
+
 export const config = { runtime: 'edge' };
