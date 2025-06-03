@@ -1,5 +1,4 @@
 // 🚀 HYBRID-OPTIMIZED WebRTC Signaling Server
-// Edge Runtime Compatible - Adaptive Performance Strategy
 
 const ENABLE_DETAILED_LOGGING = false;
 
@@ -49,34 +48,10 @@ let genderScoreTable = new Map(); // Pre-calculated gender combinations
 let matchObjectPool = [];
 let signalObjectPool = [];
 
-// Performance tracking
-let requestCount = 0;
-let lastResetTime = Date.now();
-let matchingStats = {
-    simpleMatchCount: 0,
-    hybridMatchCount: 0,
-    optimizedMatchCount: 0,
-    avgMatchTime: 0
-};
-
 // ==========================================
 // PERFORMANCE MONITORING
 // ==========================================
 
-function trackMatchingPerformance(strategy, duration) {
-    matchingStats[`${strategy}MatchCount`]++;
-    
-    // Update rolling average
-    const totalMatches = matchingStats.simpleMatchCount + 
-                        matchingStats.hybridMatchCount + 
-                        matchingStats.optimizedMatchCount;
-    
-    if (totalMatches > 0) {
-        matchingStats.avgMatchTime = (matchingStats.avgMatchTime * (totalMatches - 1) + duration) / totalMatches;
-    }
-    
-    smartLog('PERF', `${strategy} match took ${duration}ms | Avg: ${matchingStats.avgMatchTime.toFixed(2)}ms`);
-}
 
 // ==========================================
 // LOGGING UTILITIES
@@ -450,22 +425,17 @@ function handleInstantMatch(userId, data) {
     if (waitingUsers.size <= SIMPLE_STRATEGY_THRESHOLD) {
         // Very small pool - use simple linear search (fastest for small data)
         bestMatch = findSimpleMatch(userId, chatZone, userGender);
-        strategy = 'simple';
         
     } else if (waitingUsers.size <= HYBRID_STRATEGY_THRESHOLD) {
         // Medium pool - use hybrid approach
         bestMatch = findHybridMatch(userId, chatZone, userGender);
-        strategy = 'hybrid';
         
     } else {
         // Large pool - use full optimization
         buildIndexesIfNeeded();
         bestMatch = findUltraFastMatch(userId, chatZone, userGender);
-        strategy = 'optimized';
     }
     
-    const matchTime = Date.now() - startTime;
-    trackMatchingPerformance(strategy, matchTime);
     
     if (bestMatch) {
         const partnerId = bestMatch.userId;
