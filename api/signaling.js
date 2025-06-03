@@ -1,4 +1,3 @@
-
 // Helper function to safely parse environment variables
 function parseEnvInt(envVar, defaultValue) {
     const value = Deno.env.get(envVar);
@@ -26,6 +25,7 @@ const TIMEZONE_CIRCLE_HOURS = 24; // 24-hour timezone circle (fixed)
 
 let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo, chatZone }
 let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
+
 
 // Smart logging function
 function smartLog(level, ...args) {
@@ -157,13 +157,13 @@ export default async function handler(req) {
         // Parse request body
         const data = await req.json();
         
-        const { action, userId, chatZone } = data;
+        const { action, userId, chatZone, gender } = data;
         
         if (!userId) {
             return createCorsResponse({ error: 'userId is required' }, 400);
         }
         
-        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId} (ChatZone: ${chatZone || 'N/A'})`);
+        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId} (ChatZone: ${chatZone || 'N/A'}, Gender: ${gender || 'N/A'})`);
         
         switch (action) {
             case 'instant-match': 
@@ -486,7 +486,7 @@ function handleInstantMatch(userId, data) {
 // ==========================================
 
 function handleGetSignals(userId, data) {
-    const { chatZone } = data;
+    const { chatZone, gender } = data;
     
     // Find user's match
     for (const [matchId, match] of activeMatches.entries()) {
@@ -520,6 +520,7 @@ function handleGetSignals(userId, data) {
             position,
             waitingUsers: waitingUsers.size,
             chatZone: chatZone,
+            userGender: gender || 'Unspecified',
             timestamp: Date.now()
         });
     }
