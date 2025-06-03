@@ -1,730 +1,492 @@
-// Complete Vercel KV WebRTC Signaling Server - Server Proxy Architecture
-// 8 endpoints: join-queue, poll-match, send-signal, get-signals, send-ice, get-ice, connection-ready, disconnect
+// Improved WebRTC Signaling Server
+// Fixed: Race conditions, memory leaks, proper signal types
 
-import { kv } from '@vercel/kv';
+let queue = [];
+let matches = new Map();
+let userSessions = new Map(); // Track active sessions
+let iceBuffer = new Map(); // matchId -> { p1: [candidates], p2: [candidates] }
+const MATCH_TIMEOUT = 300000; // 5 minutes
+const CLEANUP_INTERVAL = 60000; // 1 minute
+const MAX_SIGNALS_PER_USER = 50;
+const MAX_ICE_PER_USER = 100; // ICE candidates can be many
+const RATE_LIMIT = new Map(); // userId -> { count, resetTime }
 
-// Constants
-const MATCH_TIMEOUT = 300; // 5 minutes TTL
-const MAX_QUEUE_SIZE = 100; // Max users per timezone queue
-const MAX_ICE_CANDIDATES = 20; // Max ICE candidates per user per match
+// Valid WebRTC signal types (excluding ICE - handled separately)
+const VALID_SIGNAL_TYPES = [
+  'offer', 'answer', 'ice-gathering-complete',
+  'connection-state-change', 'ready', 'error', 'close'
+];
 
-// In-memory stats
-let serverStats = {
-  totalMatches: 0,
-  activeMatches: 0,
-  totalSignals: 0,
-  totalICE: 0,
-  startTime: Date.now()
-};
+// Start cleanup interval
+setInterval(cleanup, CLEANUP_INTERVAL);
 
 export default async function handler(req, res) {
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 
-    'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control'
-  );
-  res.setHeader('Access-Control-Max-Age', '86400');
-  res.setHeader('Access-Control-Allow-Credentials', 'false');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
-  // Handle OPTIONS preflight
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  // Health check
-  if (req.method === 'GET' && (!req.query.action || req.query.action === 'health')) {
-    return handleHealthCheck(res);
-  }
-  
-  try {
-    const data = req.method === 'GET' ? req.query : 
-                 (typeof req.body === 'string' ? JSON.parse(req.body) : req.body);
-    
-    const { action, userId } = data;
-    
+  if (req.method === 'GET') {
+    const { userId } = req.query;
     if (!userId) {
-      return res.status(400).json({ error: 'Missing userId' });
-    }
-    
-    switch (action) {
-      case 'join-queue':
-        return await handleJoinQueue(userId, data, res);
-      case 'poll-match':
-        return await handlePollMatch(userId, res);
-      case 'send-signal':
-        return await handleSendSignal(userId, data, res);
-      case 'get-signals':
-        return await handleGetSignals(userId, data, res);
-      case 'send-ice':
-        return await handleSendICE(userId, data, res);
-      case 'get-ice':
-        return await handleGetICE(userId, data, res);
-      case 'connection-ready':
-        return await handleConnectionReady(userId, data, res);
-      case 'disconnect':
-        return await handleDisconnect(userId, res);
-      default:
-        return res.status(400).json({ 
-          error: 'Unknown action',
-          supportedActions: ['join-queue', 'poll-match', 'send-signal', 'get-signals', 'send-ice', 'get-ice', 'connection-ready', 'disconnect']
-        });
-    }
-  } catch (error) {
-    console.error('[SIGNALING] Error:', error);
-    return res.status(500).json({ 
-      error: 'Server error', 
-      details: error.message,
-      timestamp: Date.now()
-    });
-  }
-}
-
-// Health check endpoint
-async function handleHealthCheck(res) {
-  try {
-    // Test KV connection with timeout
-    const pingPromise = kv.ping();
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('KV timeout')), 3000)
-    );
-    
-    await Promise.race([pingPromise, timeoutPromise]);
-    
-    const uptime = Date.now() - serverStats.startTime;
-    
-    // Get queue lengths (with error handling)
-    const queueStats = await Promise.allSettled([
-      kv.llen('waiting_queue:global'),
-      kv.llen('waiting_queue:gmt+7'),
-      kv.llen('waiting_queue:gmt+8'),
-      kv.llen('waiting_queue:gmt-5')
-    ]);
-    
-    const totalWaiting = queueStats.reduce((sum, result) => {
-      return sum + (result.status === 'fulfilled' ? (result.value || 0) : 0);
-    }, 0);
-    
-    return res.json({
-      status: 'healthy',
-      uptime: Math.floor(uptime / 1000),
-      stats: {
-        ...serverStats,
-        totalWaiting,
-        queueLengths: {
-          global: queueStats[0].status === 'fulfilled' ? queueStats[0].value : 0,
-          'gmt+7': queueStats[1].status === 'fulfilled' ? queueStats[1].value : 0,
-          'gmt+8': queueStats[2].status === 'fulfilled' ? queueStats[2].value : 0,
-          'gmt-5': queueStats[3].status === 'fulfilled' ? queueStats[3].value : 0
+      return res.json({ 
+        status: 'online', 
+        stats: { 
+          waiting: queue.length, 
+          matches: matches.size,
+          sessions: userSessions.size
         },
         timestamp: Date.now()
-      },
-      message: 'Signaling server ready with server proxy architecture'
-    });
+      });
+    }
+    return handlePoll(userId, res);
+  }
+  
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+  
+  try {
+    const data = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const { action, userId } = data;
+    
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({ error: 'Valid userId required' });
+    }
+    
+    // Rate limiting
+    if (!checkRateLimit(userId)) {
+      return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    
+    // Update user session
+    userSessions.set(userId, Date.now());
+    
+    switch (action) {
+      case 'join-queue': 
+        return handleJoin(userId, res);
+      case 'send-signal': 
+        return handleSend(userId, data, res);
+      case 'send-ice': 
+        return handleSendIce(userId, data, res);
+      case 'get-ice': 
+        return handleGetIce(userId, data, res);
+      case 'disconnect': 
+        return handleDisconnect(userId, res);
+      default: 
+        return res.status(400).json({ error: `Unknown action: ${action}` });
+    }
   } catch (error) {
-    return res.status(503).json({
-      status: 'unhealthy',
-      error: error.message,
-      timestamp: Date.now()
-    });
+    console.error('[SERVER ERROR]', error);
+    return res.status(500).json({ error: 'Server error' });
   }
 }
 
-// Join waiting queue với timezone support
-async function handleJoinQueue(userId, data, res) {
-  try {
-    const { timezone = 'global' } = data;
-    
-    // Validate timezone
-    const validTimezones = ['global', 'gmt+7', 'gmt+8', 'gmt+9', 'gmt-5', 'gmt-4', 'gmt-8'];
-    const userTimezone = validTimezones.includes(timezone) ? timezone : 'global';
-    
-    // Check if user already has active match
-    const existingUser = await kv.hgetall(`users:${userId}`);
-    if (existingUser && existingUser.matchId) {
-      const matchData = await kv.hgetall(`matches:${existingUser.matchId}`);
-      if (matchData && matchData.status !== 'expired') {
-        const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-        return res.json({
-          status: 'already_matched',
-          matchId: existingUser.matchId,
-          partnerId,
-          isInitiator: matchData.p1 === userId,
-          message: 'You already have an active match'
-        });
-      }
-    }
-    
-    // Remove user from any existing queues
-    await removeFromAllQueues(userId);
-    
-    // Try to find match in same timezone first
-    const primaryQueue = `waiting_queue:${userTimezone}`;
-    let partnerId = await kv.rpop(primaryQueue);
-    
-    // Fallback to global queue if no match in timezone
-    if (!partnerId && userTimezone !== 'global') {
-      partnerId = await kv.rpop('waiting_queue:global');
-    }
-    
-    // Fallback to adjacent timezones
-    if (!partnerId) {
-      const adjacentTimezones = getAdjacentTimezones(userTimezone);
-      for (const tz of adjacentTimezones) {
-        partnerId = await kv.rpop(`waiting_queue:${tz}`);
-        if (partnerId && partnerId !== userId) break;
-        partnerId = null;
-      }
-    }
-    
-    if (partnerId && partnerId !== userId) {
-      // Create match
-      const matchId = generateMatchId();
-      const p1 = userId < partnerId ? userId : partnerId; // Consistent initiator logic
-      const p2 = userId < partnerId ? partnerId : userId;
-      
-      const matchData = {
-        p1,
-        p2,
-        created: Date.now().toString(),
-        status: 'signaling',
-        timezone: userTimezone
-      };
-      
-      // Store match data với TTL
-      await kv.hset(`matches:${matchId}`, matchData);
-      await kv.expire(`matches:${matchId}`, MATCH_TIMEOUT);
-      
-      // Update user status
-      await Promise.all([
-        kv.hset(`users:${userId}`, {
-          status: 'matched',
-          matchId,
-          timezone: userTimezone,
-          lastSeen: Date.now().toString()
-        }),
-        kv.hset(`users:${partnerId}`, {
-          status: 'matched',
-          matchId,
-          timezone: userTimezone,
-          lastSeen: Date.now().toString()
-        })
-      ]);
-      
-      // Set TTL for user data
-      await Promise.all([
-        kv.expire(`users:${userId}`, MATCH_TIMEOUT),
-        kv.expire(`users:${partnerId}`, MATCH_TIMEOUT)
-      ]);
-      
-      // Update stats
-      serverStats.totalMatches++;
-      serverStats.activeMatches++;
-      
-      return res.json({
-        status: 'matched',
-        matchId,
-        partnerId,
-        isInitiator: userId === p1,
-        timezone: userTimezone,
-        message: `Matched with ${partnerId}! Start signaling.`
-      });
-      
-    } else {
-      // Add to queue
-      const queueKey = `waiting_queue:${userTimezone}`;
-      
-      // Check queue size limit
-      const currentQueueSize = await kv.llen(queueKey) || 0;
-      if (currentQueueSize >= MAX_QUEUE_SIZE) {
-        return res.status(503).json({
-          status: 'queue_full',
-          message: `Queue for ${userTimezone} is full. Try again later.`,
-          retryAfter: 30
-        });
-      }
-      
-      await kv.lpush(queueKey, userId);
-      await kv.expire(queueKey, MATCH_TIMEOUT);
-      
-      // Update user status
-      await kv.hset(`users:${userId}`, {
-        status: 'waiting',
-        timezone: userTimezone,
-        queuedAt: Date.now().toString(),
-        lastSeen: Date.now().toString()
-      });
-      await kv.expire(`users:${userId}`, MATCH_TIMEOUT);
-      
-      const position = await kv.llen(queueKey);
-      const estimatedWait = Math.min(position * 5, 60); // 5s per person, max 60s
-      
-      return res.json({
-        status: 'queued',
-        position,
-        estimatedWait,
-        timezone: userTimezone,
-        message: `Added to ${userTimezone} queue. Position: ${position}`
-      });
-    }
-    
-  } catch (error) {
-    console.error('[JOIN_QUEUE] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to join queue',
-      details: error.message 
-    });
+// ==========================================
+// RATE LIMITING
+// ==========================================
+
+function checkRateLimit(userId) {
+  const now = Date.now();
+  const limit = RATE_LIMIT.get(userId);
+  
+  if (!limit || now > limit.resetTime) {
+    RATE_LIMIT.set(userId, { count: 1, resetTime: now + 60000 }); // 1 minute window
+    return true;
   }
+  
+  if (limit.count >= 60) { // 60 requests per minute
+    return false;
+  }
+  
+  limit.count++;
+  return true;
 }
 
-// Poll for match status
-async function handlePollMatch(userId, res) {
-  try {
-    const userData = await kv.hgetall(`users:${userId}`);
+// ==========================================
+// HANDLERS
+// ==========================================
+
+function handlePoll(userId, res) {
+  cleanup();
+  
+  // Update session timestamp
+  userSessions.set(userId, Date.now());
+  
+  // Check active match
+  const matchInfo = findUserMatch(userId);
+  if (matchInfo) {
+    const { matchId, match } = matchInfo;
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    const signals = match.signals[userId] || [];
     
-    if (!userData || !userData.status) {
-      return res.json({
-        status: 'not_found',
-        action_needed: 'join-queue',
-        message: 'User not found. Please join queue.'
-      });
-    }
+    // Clear signals after reading (atomic operation)
+    match.signals[userId] = [];
     
-    // Update last seen
-    await kv.hset(`users:${userId}`, 'lastSeen', Date.now().toString());
+    const isReady = match.status === 'connected' || 
+                   signals.some(s => s.type === 'ready');
     
-    if (userData.status === 'waiting') {
-      const queueKey = `waiting_queue:${userData.timezone || 'global'}`;
-      const queueList = await kv.lrange(queueKey, 0, -1);
-      const position = queueList.indexOf(userId) + 1;
-      
-      return res.json({
-        status: 'waiting',
-        position: position || 1,
-        estimatedWait: Math.min(position * 5, 60),
-        timezone: userData.timezone,
-        message: `Waiting in queue. Position: ${position}`
-      });
-    }
-    
-    if (userData.status === 'matched' && userData.matchId) {
-      const matchData = await kv.hgetall(`matches:${userData.matchId}`);
-      
-      if (!matchData || matchData.status === 'expired') {
-        // Clean up expired match
-        await cleanupUser(userId);
-        return res.json({
-          status: 'match_expired',
-          action_needed: 'join-queue',
-          message: 'Match expired. Please join queue again.'
-        });
-      }
-      
-      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-      
-      return res.json({
-        status: 'matched',
-        matchId: userData.matchId,
-        partnerId,
-        isInitiator: matchData.p1 === userId,
-        connectionReady: matchData.status === 'connected',
-        message: 'Match active. Ready for signaling.'
-      });
-    }
+    console.log(`[POLL] ${userId} -> match ${matchId}, ${signals.length} signals`);
     
     return res.json({
-      status: userData.status || 'unknown',
-      lastSeen: userData.lastSeen,
-      message: `User status: ${userData.status}`
-    });
-    
-  } catch (error) {
-    console.error('[POLL_MATCH] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to poll match',
-      details: error.message 
-    });
-  }
-}
-
-// Send signaling data (offer/answer)
-async function handleSendSignal(userId, data, res) {
-  try {
-    const { matchId, type, signal } = data;
-    
-    if (!matchId || !type || !signal) {
-      return res.status(400).json({ error: 'Missing required fields: matchId, type, signal' });
-    }
-    
-    if (!['offer', 'answer'].includes(type)) {
-      return res.status(400).json({ error: 'Signal type must be "offer" or "answer"' });
-    }
-    
-    // Verify match exists and user is participant
-    const matchData = await kv.hgetall(`matches:${matchId}`);
-    if (!matchData || (matchData.p1 !== userId && matchData.p2 !== userId)) {
-      return res.status(403).json({ error: 'Invalid match or unauthorized' });
-    }
-    
-    const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-    const signalKey = `signals:${matchId}:${partnerId}`;
-    
-    // Store signal for partner
-    await kv.hset(signalKey, {
-      [type]: JSON.stringify(signal),
-      timestamp: Date.now().toString(),
-      from: userId
-    });
-    await kv.expire(signalKey, MATCH_TIMEOUT);
-    
-    serverStats.totalSignals++;
-    
-    return res.json({
-      status: 'sent',
-      type,
+      status: isReady ? 'connected' : 'matched',
+      matchId: isReady ? undefined : matchId,
       partnerId,
-      timestamp: Date.now(),
-      message: `${type} signal sent to ${partnerId}`
-    });
-    
-  } catch (error) {
-    console.error('[SEND_SIGNAL] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to send signal',
-      details: error.message 
+      isInitiator: match.p1 === userId,
+      signals,
+      connectionReady: isReady,
+      timestamp: Date.now()
     });
   }
-}
-
-// Get signaling data
-async function handleGetSignals(userId, data, res) {
-  try {
-    const { matchId } = data;
-    
-    if (!matchId) {
-      return res.status(400).json({ error: 'Missing matchId' });
-    }
-    
-    const signalKey = `signals:${matchId}:${userId}`;
-    const signals = await kv.hgetall(signalKey);
-    
-    if (!signals || Object.keys(signals).length === 0) {
-      return res.json({
-        status: 'no_signals',
-        signals: {},
-        count: 0
-      });
-    }
-    
-    // Parse signals
-    const parsedSignals = {};
-    for (const [key, value] of Object.entries(signals)) {
-      if (key !== 'timestamp' && key !== 'from') {
-        try {
-          parsedSignals[key] = JSON.parse(value);
-        } catch (e) {
-          parsedSignals[key] = value;
-        }
-      }
-    }
-    
-    // Clear signals after reading
-    await kv.del(signalKey);
-    
+  
+  // Check queue position
+  const queuePosition = queue.findIndex(id => id === userId);
+  if (queuePosition !== -1) {
     return res.json({
-      status: 'received',
-      signals: parsedSignals,
-      count: Object.keys(parsedSignals).length,
-      timestamp: signals.timestamp,
-      from: signals.from
-    });
-    
-  } catch (error) {
-    console.error('[GET_SIGNALS] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to get signals',
-      details: error.message 
+      status: 'waiting',
+      position: queuePosition + 1,
+      estimatedWait: Math.min((queuePosition + 1) * 5, 60),
+      timestamp: Date.now()
     });
   }
+  
+  return res.json({ 
+    status: 'not_found', 
+    action_needed: 'join-queue',
+    timestamp: Date.now()
+  });
 }
 
-// Send ICE candidate
-async function handleSendICE(userId, data, res) {
-  try {
-    const { matchId, candidate } = data;
-    
-    if (!matchId || !candidate) {
-      return res.status(400).json({ error: 'Missing required fields: matchId, candidate' });
-    }
-    
-    // Verify match
-    const matchData = await kv.hgetall(`matches:${matchId}`);
-    if (!matchData || (matchData.p1 !== userId && matchData.p2 !== userId)) {
-      return res.status(403).json({ error: 'Invalid match or unauthorized' });
-    }
-    
-    const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-    const iceKey = `ice:${matchId}:${partnerId}`;
-    
-    // Check current ICE queue length
-    const currentLength = await kv.llen(iceKey) || 0;
-    if (currentLength >= MAX_ICE_CANDIDATES) {
-      // Remove oldest candidate to make room
-      await kv.rpop(iceKey);
-    }
-    
-    // Add new ICE candidate
-    await kv.lpush(iceKey, JSON.stringify({
-      candidate,
-      timestamp: Date.now(),
-      from: userId
-    }));
-    await kv.expire(iceKey, MATCH_TIMEOUT);
-    
-    serverStats.totalICE++;
+function handleJoin(userId, res) {
+  cleanup();
+  
+  // Check if user already has an active match
+  const existingMatch = findUserMatch(userId);
+  if (existingMatch) {
+    const { matchId, match } = existingMatch;
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
     
     return res.json({
-      status: 'sent',
+      status: 'matched',
+      matchId,
       partnerId,
-      queueLength: Math.min(currentLength + 1, MAX_ICE_CANDIDATES),
+      isInitiator: match.p1 === userId,
+      signals: match.signals[userId] || [],
+      connectionReady: match.status === 'connected',
+      timestamp: Date.now()
+    });
+  }
+  
+  // Remove user from queue if present (prevent duplicates)
+  queue = queue.filter(id => id !== userId);
+  
+  // Atomic matching operation
+  if (queue.length > 0) {
+    const partnerId = queue.shift();
+    const matchId = createMatch(userId, partnerId);
+    
+    console.log(`[MATCHED] ${userId} <-> ${partnerId} (${matchId})`);
+    
+    const match = matches.get(matchId);
+    return res.json({
+      status: 'matched',
+      matchId,
+      partnerId,
+      isInitiator: match.p1 === userId,
+      signals: [],
+      connectionReady: false,
+      timestamp: Date.now()
+    });
+  }
+  
+  // Add to queue
+  queue.push(userId);
+  
+  console.log(`[QUEUE] ${userId} -> position ${queue.length}`);
+  
+  return res.json({
+    status: 'queued',
+    position: queue.length,
+    estimatedWait: Math.min(queue.length * 5, 60),
+    timestamp: Date.now()
+  });
+}
+
+function handleSend(userId, data, res) {
+  const { matchId, type, payload } = data;
+  
+  // Validate signal type
+  if (!VALID_SIGNAL_TYPES.includes(type)) {
+    return res.status(400).json({ error: `Invalid signal type: ${type}. Use send-ice for ICE candidates.` });
+  }
+  
+  const match = matches.get(matchId);
+  if (!match) {
+    return res.status(404).json({ error: 'Match not found or expired' });
+  }
+  
+  if (match.p1 !== userId && match.p2 !== userId) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  
+  const partnerId = match.p1 === userId ? match.p2 : match.p1;
+  
+  // Add signal to partner's queue with size limit
+  if (!match.signals[partnerId]) {
+    match.signals[partnerId] = [];
+  }
+  
+  match.signals[partnerId].push({ 
+    type, 
+    payload, 
+    from: userId, 
+    timestamp: Date.now() 
+  });
+  
+  // Enforce signal queue limit
+  if (match.signals[partnerId].length > MAX_SIGNALS_PER_USER) {
+    match.signals[partnerId] = match.signals[partnerId].slice(-MAX_SIGNALS_PER_USER);
+  }
+  
+  // Update match status
+  if (type === 'ready') {
+    match.status = 'connected';
+    match.connectedAt = Date.now();
+  } else if (type === 'error' || type === 'close') {
+    match.status = 'failed';
+  }
+  
+  // Get user's pending signals and ICE candidates
+  const mySignals = match.signals[userId] || [];
+  const myIceCandidates = getIceCandidates(matchId, userId);
+  match.signals[userId] = [];
+  
+  const connectionReady = match.status === 'connected';
+  
+  console.log(`[SIGNAL] ${userId} -> ${partnerId}: ${type}`);
+  
+  return res.json({
+    status: connectionReady ? 'connected' : 'signaling',
+    matchId: connectionReady ? undefined : matchId,
+    partnerId,
+    signals: mySignals,
+    iceCandidates: myIceCandidates,
+    connectionReady,
+    timestamp: Date.now()
+  });
+}
+
+function handleSendIce(userId, data, res) {
+  const { matchId, candidate, sdpMLineIndex, sdpMid } = data;
+  
+  if (!matchId || !candidate) {
+    return res.status(400).json({ error: 'Missing matchId or candidate' });
+  }
+  
+  const match = matches.get(matchId);
+  if (!match) {
+    return res.status(404).json({ error: 'Match not found or expired' });
+  }
+  
+  if (match.p1 !== userId && match.p2 !== userId) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  
+  const partnerId = match.p1 === userId ? match.p2 : match.p1;
+  
+  // Initialize ICE buffer if needed
+  if (!iceBuffer.has(matchId)) {
+    iceBuffer.set(matchId, { [match.p1]: [], [match.p2]: [] });
+  }
+  
+  const iceData = iceBuffer.get(matchId);
+  
+  // Add ICE candidate to partner's buffer
+  if (!iceData[partnerId]) {
+    iceData[partnerId] = [];
+  }
+  
+  iceData[partnerId].push({
+    candidate,
+    sdpMLineIndex,
+    sdpMid,
+    from: userId,
+    timestamp: Date.now()
+  });
+  
+  // Enforce ICE buffer limit
+  if (iceData[partnerId].length > MAX_ICE_PER_USER) {
+    iceData[partnerId] = iceData[partnerId].slice(-MAX_ICE_PER_USER);
+  }
+  
+  console.log(`[ICE] ${userId} -> ${partnerId}: candidate sent`);
+  
+  return res.json({
+    status: 'ice-sent',
+    matchId,
+    partnerId,
+    timestamp: Date.now()
+  });
+}
+
+function handleGetIce(userId, data, res) {
+  const { matchId } = data;
+  
+  if (!matchId) {
+    return res.status(400).json({ error: 'Missing matchId' });
+  }
+  
+  const match = matches.get(matchId);
+  if (!match) {
+    return res.status(404).json({ error: 'Match not found or expired' });
+  }
+  
+  if (match.p1 !== userId && match.p2 !== userId) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  
+  // Get ICE candidates for this user
+  const iceCandidates = getIceCandidates(matchId, userId);
+  
+  console.log(`[GET-ICE] ${userId}: ${iceCandidates.length} candidates`);
+  
+  return res.json({
+    status: 'ice-retrieved',
+    matchId,
+    iceCandidates,
+    timestamp: Date.now()
+  });
+}
+
+function handleDisconnect(userId, res) {
+  console.log(`[DISCONNECT] ${userId}`);
+  
+  // Remove from queue
+  queue = queue.filter(id => id !== userId);
+  
+  // Remove from matches and notify partner
+  const matchInfo = findUserMatch(userId);
+  if (matchInfo) {
+    const { matchId, match } = matchInfo;
+    const partnerId = match.p1 === userId ? match.p2 : match.p1;
+    
+    // Add disconnect signal for partner
+    if (!match.signals[partnerId]) {
+      match.signals[partnerId] = [];
+    }
+    match.signals[partnerId].push({
+      type: 'close',
+      payload: { reason: 'partner_disconnected' },
+      from: userId,
       timestamp: Date.now()
     });
     
-  } catch (error) {
-    console.error('[SEND_ICE] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to send ICE candidate',
-      details: error.message 
-    });
+    // Clean up match after delay to allow partner to receive disconnect signal
+    setTimeout(() => {
+      matches.delete(matchId);
+      iceBuffer.delete(matchId); // Clean ICE buffer too
+      console.log(`[CLEANUP] Removed match ${matchId} after disconnect`);
+    }, 5000);
   }
+  
+  // Remove user session
+  userSessions.delete(userId);
+  
+  return res.json({ 
+    status: 'disconnected',
+    timestamp: Date.now()
+  });
 }
 
-// Get ICE candidates
-async function handleGetICE(userId, data, res) {
-  try {
-    const { matchId } = data;
-    
-    if (!matchId) {
-      return res.status(400).json({ error: 'Missing matchId' });
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
+
+function findUserMatch(userId) {
+  for (const [matchId, match] of matches.entries()) {
+    if (match.p1 === userId || match.p2 === userId) {
+      return { matchId, match };
     }
-    
-    const iceKey = `ice:${matchId}:${userId}`;
-    const candidates = await kv.lrange(iceKey, 0, -1);
-    
-    if (!candidates || candidates.length === 0) {
-      return res.json({
-        status: 'no_candidates',
-        candidates: [],
-        count: 0
-      });
-    }
-    
-    // Parse candidates
-    const parsedCandidates = candidates.map(candidate => {
-      try {
-        return JSON.parse(candidate);
-      } catch (e) {
-        return { candidate, timestamp: Date.now(), from: 'unknown' };
-      }
-    });
-    
-    // Clear ICE candidates after reading
-    await kv.del(iceKey);
-    
-    return res.json({
-      status: 'received',
-      candidates: parsedCandidates,
-      count: parsedCandidates.length
-    });
-    
-  } catch (error) {
-    console.error('[GET_ICE] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to get ICE candidates',
-      details: error.message 
-    });
   }
+  return null;
 }
 
-// Mark connection as ready
-async function handleConnectionReady(userId, data, res) {
-  try {
-    const { matchId } = data;
-    
-    if (!matchId) {
-      return res.status(400).json({ error: 'Missing matchId' });
-    }
-    
-    // Update match status
-    await kv.hset(`matches:${matchId}`, {
-      status: 'connected',
-      connectedAt: Date.now().toString()
-    });
-    
-    // Cleanup signaling data
-    const matchData = await kv.hgetall(`matches:${matchId}`);
-    if (matchData) {
-      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-      
-      // Clean up signaling and ICE data
-      await Promise.all([
-        kv.del(`signals:${matchId}:${userId}`),
-        kv.del(`signals:${matchId}:${partnerId}`),
-        kv.del(`ice:${matchId}:${userId}`),
-        kv.del(`ice:${matchId}:${partnerId}`)
-      ]);
-    }
-    
-    return res.json({
-      status: 'connected',
-      message: 'Connection established and signaling data cleaned up',
-      timestamp: Date.now()
-    });
-    
-  } catch (error) {
-    console.error('[CONNECTION_READY] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to mark connection ready',
-      details: error.message 
-    });
-  }
-}
-
-// Disconnect user
-async function handleDisconnect(userId, res) {
-  try {
-    // Get user data
-    const userData = await kv.hgetall(`users:${userId}`);
-    let cleanupResults = {
-      userRemoved: false,
-      matchCleaned: false,
-      queueRemoved: false,
-      partnerNotified: false
-    };
-    
-    if (userData && userData.matchId) {
-      const matchData = await kv.hgetall(`matches:${userData.matchId}`);
-      if (matchData) {
-        const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
-        
-        // Clean up match and related data
-        await Promise.all([
-          kv.del(`matches:${userData.matchId}`),
-          kv.del(`signals:${userData.matchId}:${userId}`),
-          kv.del(`signals:${userData.matchId}:${partnerId}`),
-          kv.del(`ice:${userData.matchId}:${userId}`),
-          kv.del(`ice:${userData.matchId}:${partnerId}`),
-          kv.del(`users:${partnerId}`)
-        ]);
-        
-        cleanupResults.matchCleaned = true;
-        cleanupResults.partnerNotified = true;
-        
-        // Update stats
-        if (matchData.status === 'signaling' || matchData.status === 'connected') {
-          serverStats.activeMatches = Math.max(0, serverStats.activeMatches - 1);
-        }
-      }
-    }
-    
-    // Remove from all queues
-    const removedFromQueues = await removeFromAllQueues(userId);
-    cleanupResults.queueRemoved = removedFromQueues > 0;
-    
-    // Remove user data
-    await kv.del(`users:${userId}`);
-    cleanupResults.userRemoved = true;
-    
-    return res.json({
-      status: 'disconnected',
-      cleanup: cleanupResults,
-      message: 'Successfully disconnected and cleaned up all data',
-      timestamp: Date.now()
-    });
-    
-  } catch (error) {
-    console.error('[DISCONNECT] Error:', error);
-    return res.status(500).json({ 
-      error: 'Failed to disconnect',
-      details: error.message 
-    });
-  }
-}
-
-// Helper functions
-function generateMatchId() {
-  return `m_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-}
-
-function getAdjacentTimezones(timezone) {
-  const timezoneMap = {
-    'gmt+7': ['gmt+8', 'gmt+6', 'gmt+9'],
-    'gmt+8': ['gmt+7', 'gmt+9', 'gmt+6'],
-    'gmt+9': ['gmt+8', 'gmt+7', 'gmt+10'],
-    'gmt-5': ['gmt-4', 'gmt-6', 'gmt-3'],
-    'gmt-4': ['gmt-5', 'gmt-3', 'gmt-6'],
-    'gmt-8': ['gmt-7', 'gmt-9', 'gmt-6'],
-    'global': ['gmt+7', 'gmt+8', 'gmt-5']
+function createMatch(userId1, userId2) {
+  const matchId = `m_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+  
+  // Consistent ordering for deterministic initiator
+  const p1 = userId1 < userId2 ? userId1 : userId2;
+  const p2 = userId1 < userId2 ? userId2 : userId1;
+  
+  const match = {
+    p1, 
+    p2, 
+    createdAt: Date.now(),
+    status: 'signaling',
+    signals: { [p1]: [], [p2]: [] }
   };
   
-  return timezoneMap[timezone] || ['global'];
+  matches.set(matchId, match);
+  
+  // Initialize ICE buffer for this match
+  iceBuffer.set(matchId, { [p1]: [], [p2]: [] });
+  
+  return matchId;
 }
 
-async function removeFromAllQueues(userId) {
-  try {
-    const commonQueues = [
-      'waiting_queue:global',
-      'waiting_queue:gmt+7',
-      'waiting_queue:gmt+8', 
-      'waiting_queue:gmt+9',
-      'waiting_queue:gmt-5',
-      'waiting_queue:gmt-4',
-      'waiting_queue:gmt-8'
-    ];
+function getIceCandidates(matchId, userId) {
+  if (!iceBuffer.has(matchId)) {
+    return [];
+  }
+  
+  const iceData = iceBuffer.get(matchId);
+  const candidates = iceData[userId] || [];
+  
+  // Clear after reading
+  iceData[userId] = [];
+  
+  return candidates;
+}
+
+// ==========================================
+// CLEANUP
+// ==========================================
+
+function cleanup() {
+  const now = Date.now();
+  let cleanedMatches = 0;
+  let cleanedSessions = 0;
+  
+  // Clean old matches
+  for (const [matchId, match] of matches.entries()) {
+    const age = now - match.createdAt;
+    const shouldCleanup = age > MATCH_TIMEOUT || 
+                         (match.status === 'connected' && match.connectedAt && 
+                          now - match.connectedAt > 120000); // 2 minutes after connection
     
-    let removedCount = 0;
-    for (const queueKey of commonQueues) {
-      const removed = await kv.lrem(queueKey, 0, userId);
-      removedCount += removed || 0;
+    if (shouldCleanup) {
+      matches.delete(matchId);
+      iceBuffer.delete(matchId); // Clean ICE buffer
+      cleanedMatches++;
     }
-    
-    return removedCount;
-  } catch (error) {
-    console.error('[REMOVE_FROM_QUEUES] Error:', error);
-    return 0;
   }
-}
-
-async function cleanupUser(userId) {
-  try {
-    await removeFromAllQueues(userId);
-    await kv.del(`users:${userId}`);
-  } catch (error) {
-    console.error('[CLEANUP_USER] Error:', error);
+  
+  // Clean inactive user sessions (remove from queue if inactive)
+  for (const [userId, lastSeen] of userSessions.entries()) {
+    if (now - lastSeen > 180000) { // 3 minutes inactive
+      userSessions.delete(userId);
+      queue = queue.filter(id => id !== userId);
+      cleanedSessions++;
+    }
   }
-}
-
-// Export cleanup function cho external cron jobs (optional)
-export async function performBackgroundCleanup() {
-  try {
-    console.log('[CLEANUP] Running background cleanup...');
-    
-    // Trong Vercel KV, TTL tự động handle cleanup
-    // Function này có thể được gọi bởi cron job nếu cần
-    
-    const timestamp = Date.now();
-    return { 
-      success: true, 
-      timestamp,
-      stats: serverStats,
-      message: 'TTL-based cleanup active. Manual cleanup completed.' 
-    };
-  } catch (error) {
-    console.error('[BACKGROUND_CLEANUP] Error:', error);
-    return { 
-      success: false, 
-      error: error.message,
-      timestamp: Date.now()
-    };
+  
+  // Clean rate limit data
+  for (const [userId, limit] of RATE_LIMIT.entries()) {
+    if (now > limit.resetTime) {
+      RATE_LIMIT.delete(userId);
+    }
+  }
+  
+  if (cleanedMatches > 0 || cleanedSessions > 0) {
+    console.log(`[CLEANUP] Matches: ${cleanedMatches}, Sessions: ${cleanedSessions}. Active: queue=${queue.length}, matches=${matches.size}`);
   }
 }
