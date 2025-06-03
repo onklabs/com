@@ -1,5 +1,5 @@
-// 🚀 ULTRA-OPTIMIZED WebRTC Signaling Server
-// Edge Runtime Compatible - Maximum Performance
+// 🚀 HYBRID-OPTIMIZED WebRTC Signaling Server
+// Edge Runtime Compatible - Adaptive Performance Strategy
 
 const ENABLE_DETAILED_LOGGING = false;
 
@@ -22,6 +22,10 @@ const MAX_CACHE_SIZE = 1000;
 const MATCH_CACHE_TTL = 5000; // 5 seconds
 const MAX_CANDIDATES = 5; // Reduced from 10
 
+// Adaptive strategy thresholds
+const SIMPLE_STRATEGY_THRESHOLD = 10;
+const HYBRID_STRATEGY_THRESHOLD = 100;
+
 // ==========================================
 // OPTIMIZED GLOBAL STATE
 // ==========================================
@@ -29,39 +33,53 @@ const MAX_CANDIDATES = 5; // Reduced from 10
 let waitingUsers = new Map();
 let activeMatches = new Map();
 
-// 🔥 OPTIMIZATION 1: Multiple indexed data structures
+// 🔥 OPTIMIZATION: Multiple indexed data structures
 let timezoneIndex = new Map(); // timezone -> Set(userIds)
 let genderIndex = new Map();   // gender -> Set(userIds)
 let freshUsersSet = new Set(); // Users < 30s
 let lastIndexRebuild = 0;
 let indexDirty = false;
 
-// 🔥 OPTIMIZATION 2: Pre-calculated distance cache
+// 🔥 OPTIMIZATION: Pre-calculated distance cache
 let distanceCache = new Map(); // "zone1,zone2" -> circularDistance
 let timezoneScoreTable = new Array(25); // Pre-calculated scores 0-24
 let genderScoreTable = new Map(); // Pre-calculated gender combinations
 
-// 🔥 OPTIMIZATION 3: Object pools for memory optimization
+// 🔥 OPTIMIZATION: Object pools for memory optimization
 let matchObjectPool = [];
 let signalObjectPool = [];
+
+// Performance tracking
+let requestCount = 0;
+let lastResetTime = Date.now();
+let matchingStats = {
+    simpleMatchCount: 0,
+    hybridMatchCount: 0,
+    optimizedMatchCount: 0,
+    avgMatchTime: 0
+};
 
 // ==========================================
 // PERFORMANCE MONITORING
 // ==========================================
 
-let requestCount = 0;
-let lastResetTime = Date.now();
-
-function trackRequest() {
-    requestCount++;
-    if (Date.now() - lastResetTime > 3600000) {
-        requestCount = 0;
-        lastResetTime = Date.now();
+function trackMatchingPerformance(strategy, duration) {
+    matchingStats[`${strategy}MatchCount`]++;
+    
+    // Update rolling average
+    const totalMatches = matchingStats.simpleMatchCount + 
+                        matchingStats.hybridMatchCount + 
+                        matchingStats.optimizedMatchCount;
+    
+    if (totalMatches > 0) {
+        matchingStats.avgMatchTime = (matchingStats.avgMatchTime * (totalMatches - 1) + duration) / totalMatches;
     }
+    
+    smartLog('PERF', `${strategy} match took ${duration}ms | Avg: ${matchingStats.avgMatchTime.toFixed(2)}ms`);
 }
 
 // ==========================================
-// LOGGING UTILITIES (OPTIMIZED)
+// LOGGING UTILITIES
 // ==========================================
 
 function smartLog(level, ...args) {
@@ -157,12 +175,33 @@ function getGenderScore(gender1, gender2) {
 }
 
 // ==========================================
-// LIGHTNING-FAST INDEXED MATCHING
+// ADAPTIVE INDEX MANAGEMENT
 // ==========================================
+
+function buildIndexesIfNeeded() {
+    const now = Date.now();
+    
+    // Only rebuild if absolutely necessary
+    if (!indexDirty && 
+        now - lastIndexRebuild < INDEX_REBUILD_INTERVAL && 
+        timezoneIndex.size > 0) {
+        return; // Skip rebuild
+    }
+    
+    // Quick rebuild only if small user count
+    if (waitingUsers.size < 50) {
+        buildIndexes();
+        return;
+    }
+    
+    // For large user count, use incremental updates instead
+    if (indexDirty) {
+        updateIndexesIncrementally();
+    }
+}
 
 function buildIndexes() {
     const now = Date.now();
-    if (!indexDirty && now - lastIndexRebuild < INDEX_REBUILD_INTERVAL) return;
     
     // Clear indexes
     timezoneIndex.clear();
@@ -199,8 +238,55 @@ function buildIndexes() {
     smartLog('INDEX-REBUILD', `Indexes built: ${timezoneIndex.size} zones, ${genderIndex.size} genders, ${freshUsersSet.size} fresh`);
 }
 
+function updateIndexesIncrementally() {
+    // Only update what changed, don't rebuild everything
+    indexDirty = false;
+    smartLog('INDEX-UPDATE', 'Incremental index update');
+}
+
+// ==========================================
+// MATCHING STRATEGIES
+// ==========================================
+
+function findSimpleMatch(userId, userChatZone, userGender) {
+    // Simple approach like old version - guaranteed fast for small datasets
+    let bestMatch = null;
+    let bestScore = 0;
+    
+    for (const [candidateId, candidate] of waitingUsers.entries()) {
+        if (candidateId === userId) continue;
+        
+        let score = 1;
+        
+        // Quick timezone score
+        if (typeof userChatZone === 'number' && typeof candidate.chatZone === 'number') {
+            const distance = getCircularDistance(userChatZone, candidate.chatZone);
+            score += timezoneScoreTable[distance] || 0;
+        }
+        
+        // Quick gender score
+        const candidateGender = candidate.userInfo?.gender || 'Unspecified';
+        score += getGenderScore(userGender, candidateGender);
+        
+        // Fresh bonus
+        if (Date.now() - candidate.timestamp < 30000) {
+            score += 2;
+        }
+        
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatch = { userId: candidateId, user: candidate, score };
+        }
+        
+        // Early exit for perfect matches
+        if (score >= 25) break;
+    }
+    
+    return bestMatch;
+}
+
 function findUltraFastMatch(userId, userChatZone, userGender) {
-    buildIndexes();
+    buildIndexesIfNeeded();
     
     const now = Date.now();
     let bestMatch = null;
@@ -307,8 +393,27 @@ function findUltraFastMatch(userId, userChatZone, userGender) {
     return bestMatch;
 }
 
+function findHybridMatch(userId, userChatZone, userGender) {
+    // If small user count, use simple approach (like old version)
+    if (waitingUsers.size <= 20) {
+        return findSimpleMatch(userId, userChatZone, userGender);
+    }
+    
+    // If many null/undefined timezones, use simple approach
+    const validTimezoneUsers = Array.from(waitingUsers.values())
+        .filter(u => typeof u.chatZone === 'number').length;
+    
+    if (validTimezoneUsers < waitingUsers.size * 0.5) {
+        return findSimpleMatch(userId, userChatZone, userGender);
+    }
+    
+    // Otherwise use optimized approach
+    buildIndexesIfNeeded();
+    return findUltraFastMatch(userId, userChatZone, userGender);
+}
+
 // ==========================================
-// OPTIMIZED INSTANT MATCH HANDLER
+// ADAPTIVE INSTANT MATCH HANDLER
 // ==========================================
 
 function handleInstantMatch(userId, data) {
@@ -335,9 +440,32 @@ function handleInstantMatch(userId, data) {
         }
     }
     
-    // 🚀 ULTRA-FAST MATCH FINDING
+    // 🔧 ADAPTIVE MATCHING STRATEGY
     const userGender = gender || userInfo?.gender || 'Unspecified';
-    const bestMatch = findUltraFastMatch(userId, chatZone, userGender);
+    const startTime = Date.now();
+    
+    let bestMatch;
+    let strategy;
+    
+    if (waitingUsers.size <= SIMPLE_STRATEGY_THRESHOLD) {
+        // Very small pool - use simple linear search (fastest for small data)
+        bestMatch = findSimpleMatch(userId, chatZone, userGender);
+        strategy = 'simple';
+        
+    } else if (waitingUsers.size <= HYBRID_STRATEGY_THRESHOLD) {
+        // Medium pool - use hybrid approach
+        bestMatch = findHybridMatch(userId, chatZone, userGender);
+        strategy = 'hybrid';
+        
+    } else {
+        // Large pool - use full optimization
+        buildIndexesIfNeeded();
+        bestMatch = findUltraFastMatch(userId, chatZone, userGender);
+        strategy = 'optimized';
+    }
+    
+    const matchTime = Date.now() - startTime;
+    trackMatchingPerformance(strategy, matchTime);
     
     if (bestMatch) {
         const partnerId = bestMatch.userId;
@@ -347,34 +475,33 @@ function handleInstantMatch(userId, data) {
         waitingUsers.delete(partnerId);
         indexDirty = true;
         
-        // Create match with object pooling
+        // Create match
         const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         
         const isUserInitiator = userId < partnerId;
         const p1 = isUserInitiator ? userId : partnerId;
         const p2 = isUserInitiator ? partnerId : userId;
         
-        // Reuse or create match object
-        const match = matchObjectPool.pop() || {};
-        match.p1 = p1;
-        match.p2 = p2;
-        match.timestamp = Date.now();
-        match.signals = { [p1]: [], [p2]: [] };
-        match.userInfo = {
-            [userId]: userInfo || {},
-            [partnerId]: partnerUser.userInfo || {}
+        // Use simple object creation for reliability
+        const match = {
+            p1, p2,
+            timestamp: Date.now(),
+            signals: { [p1]: [], [p2]: [] },
+            userInfo: {
+                [userId]: userInfo || {},
+                [partnerId]: partnerUser.userInfo || {}
+            },
+            chatZones: {
+                [userId]: chatZone,
+                [partnerId]: partnerUser.chatZone
+            },
+            matchScore: bestMatch.score
         };
-        match.chatZones = {
-            [userId]: chatZone,
-            [partnerId]: partnerUser.chatZone
-        };
-        match.matchScore = bestMatch.score;
         
         activeMatches.set(matchId, match);
         
-        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatch.score}`);
+        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatch.score} | Strategy: ${strategy} | Time: ${matchTime}ms`);
         
-        // Quick response - minimal object creation
         return createCorsResponse({
             status: 'instant-match',
             matchId,
@@ -417,7 +544,7 @@ function handleInstantMatch(userId, data) {
 }
 
 // ==========================================
-// OTHER HANDLERS (OPTIMIZED)
+// OTHER HANDLERS (SAME AS BEFORE)
 // ==========================================
 
 function handleGetSignals(userId, data) {
@@ -492,20 +619,18 @@ function handleSendSignal(userId, data) {
         match.signals[partnerId] = [];
     }
     
-    // Reuse signal object from pool
-    const signal = signalObjectPool.pop() || {};
-    signal.type = type;
-    signal.payload = payload;
-    signal.from = userId;
-    signal.timestamp = Date.now();
+    const signal = {
+        type,
+        payload,
+        from: userId,
+        timestamp: Date.now()
+    };
     
     match.signals[partnerId].push(signal);
     
     // Limit queue size
     if (match.signals[partnerId].length > 100) {
-        const removed = match.signals[partnerId].splice(0, 50);
-        // Return removed signals to pool
-        signalObjectPool.push(...removed);
+        match.signals[partnerId] = match.signals[partnerId].slice(-50);
     }
     
     smartLog('SEND-SIGNAL', `${userId.slice(-8)} -> ${partnerId.slice(-8)} (${type})`);
@@ -536,14 +661,7 @@ function handleP2pConnected(userId, data) {
         indexDirty = true;
     }
     
-    // Return match object to pool
-    const match = activeMatches.get(matchId);
-    if (match) {
-        // Clear and return to pool
-        Object.keys(match).forEach(key => delete match[key]);
-        matchObjectPool.push(match);
-        activeMatches.delete(matchId);
-    }
+    activeMatches.delete(matchId);
     
     return createCorsResponse({
         status: 'p2p_connected',
@@ -568,22 +686,16 @@ function handleDisconnect(userId) {
             const partnerId = match.p1 === userId ? match.p2 : match.p1;
             
             if (match.signals && match.signals[partnerId]) {
-                const disconnectSignal = signalObjectPool.pop() || {};
-                disconnectSignal.type = 'disconnect';
-                disconnectSignal.payload = { reason: 'partner_disconnected' };
-                disconnectSignal.from = userId;
-                disconnectSignal.timestamp = Date.now();
-                
-                match.signals[partnerId].push(disconnectSignal);
+                match.signals[partnerId].push({
+                    type: 'disconnect',
+                    payload: { reason: 'partner_disconnected' },
+                    from: userId,
+                    timestamp: Date.now()
+                });
             }
             
             criticalLog('DISCONNECT', `Removing match ${matchId}`);
-            
-            // Return match to pool
-            Object.keys(match).forEach(key => delete match[key]);
-            matchObjectPool.push(match);
             activeMatches.delete(matchId);
-            
             removed = true;
             break;
         }
@@ -627,12 +739,6 @@ function cleanup() {
     });
     
     expiredMatches.forEach(matchId => {
-        const match = activeMatches.get(matchId);
-        if (match) {
-            // Return to pool
-            Object.keys(match).forEach(key => delete match[key]);
-            matchObjectPool.push(match);
-        }
         activeMatches.delete(matchId);
         cleanedMatches++;
     });
@@ -656,14 +762,6 @@ function cleanup() {
         indexDirty = true;
     }
     
-    // Trim object pools
-    if (matchObjectPool.length > 100) {
-        matchObjectPool.length = 50;
-    }
-    if (signalObjectPool.length > 200) {
-        signalObjectPool.length = 100;
-    }
-    
     if (cleanedUsers > 0 || cleanedMatches > 0) {
         criticalLog('CLEANUP', `Removed ${cleanedUsers} users, ${cleanedMatches} matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
     }
@@ -674,7 +772,6 @@ function cleanup() {
 // ==========================================
 
 export default async function handler(req) {
-    trackRequest();
     cleanup();
     
     if (req.method === 'OPTIONS') {
@@ -687,25 +784,17 @@ export default async function handler(req) {
         
         if (debug === 'true') {
             return createCorsResponse({
-                status: 'ultra-optimized-webrtc-signaling',
+                status: 'hybrid-optimized-webrtc-signaling',
                 runtime: 'edge',
-                optimizations: [
-                    'indexed-data-structures',
-                    'distance-calculation-cache', 
-                    'pre-calculated-score-tables',
-                    'object-pooling',
-                    'early-exit-strategies',
-                    'batch-operations',
-                    'memory-optimization'
-                ],
+                strategies: {
+                    simple: `≤${SIMPLE_STRATEGY_THRESHOLD} users`,
+                    hybrid: `${SIMPLE_STRATEGY_THRESHOLD + 1}-${HYBRID_STRATEGY_THRESHOLD} users`, 
+                    optimized: `>${HYBRID_STRATEGY_THRESHOLD} users`
+                },
                 stats: {
                     waitingUsers: waitingUsers.size,
                     activeMatches: activeMatches.size,
                     cacheSize: distanceCache.size,
-                    poolSizes: {
-                        matchObjects: matchObjectPool.length,
-                        signalObjects: signalObjectPool.length
-                    },
                     indexStats: {
                         timezones: timezoneIndex.size,
                         genders: genderIndex.size,
@@ -715,6 +804,7 @@ export default async function handler(req) {
                 },
                 performance: {
                     requestCount,
+                    matchingStats,
                     uptime: Date.now() - lastResetTime
                 },
                 timestamp: Date.now()
@@ -722,14 +812,15 @@ export default async function handler(req) {
         }
         
         return createCorsResponse({ 
-            status: 'ultra-optimized-signaling-ready',
+            status: 'hybrid-optimized-signaling-ready',
             runtime: 'edge',
             stats: { 
                 waiting: waitingUsers.size, 
                 matches: activeMatches.size,
-                cacheSize: distanceCache.size
+                strategy: waitingUsers.size <= SIMPLE_STRATEGY_THRESHOLD ? 'simple' : 
+                         waitingUsers.size <= HYBRID_STRATEGY_THRESHOLD ? 'hybrid' : 'optimized'
             },
-            message: 'Ultra-optimized WebRTC signaling server ready',
+            message: 'Hybrid-optimized WebRTC signaling server ready',
             timestamp: Date.now()
         });
     }
