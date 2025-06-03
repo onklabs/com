@@ -1,5 +1,6 @@
 // Optimized signaling server without Redis - using enhanced in-memory storage
 // WARNING: Data will be lost on server restart
+export const maxDuration = 60; // 30 seconds for Pro plan
 
 // Enhanced in-memory storage with automatic cleanup
 let waitingQueue = [];
