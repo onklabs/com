@@ -1,0 +1,2154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anonymous WebRTC Chat</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+
+    .chat-container {
+      max-width: 100%;
+      width: 100%;
+      max-width: 800px;
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .chat-header {
+      background: linear-gradient(135deg, #2c3e50, #34495e);
+      color: #ffffff;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      min-height: 80px;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      flex: 1;
+      min-width: 200px;
+      flex-wrap: wrap;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #status {
+      font-size: 14px;
+      font-weight: 500;
+      padding: 6px 12px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 20px;
+      backdrop-filter: blur(5px);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #e74c3c;
+      animation: pulse 2s infinite;
+    }
+
+    .status-indicator.connected {
+      background: #2ecc71;
+    }
+
+    .status-indicator.signaling {
+      background: #f39c12;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .user-info-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .info-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .info-group label {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.8);
+      white-space: nowrap;
+    }
+
+    .info-group input,
+    .info-group select {
+      padding: 4px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 12px;
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #ffffff;
+      backdrop-filter: blur(5px);
+    }
+
+    .info-group input::placeholder {
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .info-group select {
+      cursor: pointer;
+    }
+
+    .info-group select option {
+      background: #2c3e50;
+      color: #ffffff;
+    }
+
+    #name {
+      width: 100px;
+    }
+
+    #gender {
+      width: 80px;
+    }
+
+    #status-text {
+      width: 120px;
+    }
+
+    .avatar-container {
+      position: relative;
+    }
+
+    #avatar {
+      width: 45px;
+      height: 45px;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      background-size: cover;
+      background-position: center;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s ease;
+    }
+
+    #avatar:hover {
+      transform: scale(1.05);
+    }
+
+    .avatar-placeholder {
+      background: linear-gradient(135deg, #3498db, #2980b9);
+      color: #ffffff;
+    }
+
+    .avatar-placeholder .material-icons {
+      font-size: 24px;
+    }
+
+    .control-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .control-btn {
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      color: #ffffff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      backdrop-filter: blur(5px);
+    }
+
+    .control-btn:hover {
+      background: rgba(255, 255, 255, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .control-btn.disconnect {
+      background: rgba(231, 76, 60, 0.8);
+    }
+
+    .control-btn.disconnect:hover {
+      background: rgba(231, 76, 60, 1);
+    }
+
+    .control-btn.notification {
+      background: rgba(46, 204, 113, 0.8);
+    }
+
+    .control-btn.notification:hover {
+      background: rgba(46, 204, 113, 1);
+    }
+
+    .control-btn.notification.disabled {
+      background: rgba(149, 165, 166, 0.8);
+    }
+
+    .avatar-options {
+      position: absolute;
+      top: 55px;
+      right: 0;
+      background: #ffffff;
+      border-radius: 15px;
+      box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+      padding: 12px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 1000;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(0, 0, 0, 0.1);
+    }
+
+    .avatar-options button {
+      padding: 10px 15px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #3498db, #2980b9);
+      color: #ffffff;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .avatar-options button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+    }
+
+    #avatar-url {
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      width: 220px;
+      font-size: 13px;
+    }
+
+    .chat-messages {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
+      position: relative;
+    }
+
+    .chat-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .chat-messages::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.1);
+      border-radius: 3px;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 3px;
+    }
+
+    .message {
+      margin: 12px 0;
+      padding: 12px 16px;
+      border-radius: 18px;
+      max-width: 75%;
+      word-wrap: break-word;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      animation: fadeInUp 0.3s ease;
+      position: relative;
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .message-you {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: #ffffff;
+      margin-left: auto;
+      border-bottom-right-radius: 4px;
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    }
+
+    .message-other {
+      background: #FFF9C4;
+      color: #333;
+      margin-right: auto;
+      border-bottom-left-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+    }
+
+    .message-info {
+      text-align: center;
+      color: #666;
+      background: rgba(255, 255, 255, 0.8);
+      font-style: italic;
+      margin: 20px auto;
+      padding: 10px 20px;
+      border-radius: 20px;
+      backdrop-filter: blur(5px);
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      max-width: 80%;
+    }
+
+    .message-greeting {
+      background: linear-gradient(135deg, #e8f5e8, #d4f1d4);
+      color: #2d5a2d;
+      border: 1px solid rgba(76, 175, 80, 0.3);
+      font-weight: 500;
+    }
+
+    .message-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      margin-right: 8px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      flex-shrink: 0;
+    }
+
+    .message-content {
+      flex: 1;
+    }
+
+    .message-name {
+      font-weight: 600;
+      margin-bottom: 4px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .gender-badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.2);
+      color: inherit;
+    }
+
+    .message-other .gender-badge {
+      background: rgba(0, 0, 0, 0.1);
+    }
+
+    .message-text {
+      line-height: 1.4;
+      font-size: 14px;
+    }
+
+    .user-status {
+      font-size: 11px;
+      opacity: 0.8;
+      font-style: italic;
+      margin-top: 2px;
+    }
+
+    .message-image {
+      max-width: 250px;
+      max-height: 250px;
+      border-radius: 12px;
+      margin-top: 8px;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    .message-image:hover {
+      transform: scale(1.02);
+    }
+
+    .chat-input {
+      display: flex;
+      padding: 16px 20px;
+      background: #ffffff;
+      border-top: 1px solid rgba(0, 0, 0, 0.1);
+      gap: 12px;
+      align-items: center;
+      backdrop-filter: blur(10px);
+    }
+
+    #message {
+      flex: 1;
+      padding: 12px 16px;
+      border: 2px solid rgba(102, 126, 234, 0.2);
+      border-radius: 25px;
+      font-size: 14px;
+      outline: none;
+      transition: all 0.3s ease;
+      background: rgba(248, 249, 250, 0.8);
+    }
+
+    #message:focus {
+      border-color: #667eea;
+      background: #ffffff;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    .input-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .file-upload-btn {
+      width: 44px;
+      height: 44px;
+      border: none;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f39c12, #e67e22);
+      color: #ffffff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .file-upload-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(243, 156, 18, 0.4);
+    }
+
+    .file-upload-btn .material-icons {
+      font-size: 20px;
+    }
+
+    #image-file {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    #send {
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: #ffffff;
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #send:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    #send:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    #send .material-icons {
+      font-size: 20px;
+    }
+
+    @media (max-width: 768px) {
+      body {
+        padding: 0;
+      }
+
+      .chat-container {
+        height: 100vh;
+        border-radius: 0;
+        max-width: 100%;
+      }
+
+      .chat-header {
+        padding: 10px 15px;
+        min-height: 90px;
+      }
+
+      .header-left {
+        min-width: auto;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      .user-info-container {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .info-group {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+      }
+
+      .info-group input,
+      .info-group select {
+        width: 100%;
+        min-width: 70px;
+      }
+
+      #status {
+        font-size: 12px;
+        padding: 4px 8px;
+        order: -1;
+        width: 100%;
+        justify-content: center;
+        margin-bottom: 5px;
+      }
+
+      #avatar {
+        width: 35px;
+        height: 35px;
+      }
+
+      .avatar-placeholder .material-icons {
+        font-size: 20px;
+      }
+
+      .control-btn {
+        width: 35px;
+        height: 35px;
+      }
+
+      .control-btn .material-icons {
+        font-size: 18px;
+      }
+
+      .chat-messages {
+        padding: 15px;
+      }
+
+      .message {
+        max-width: 85%;
+        margin: 8px 0;
+        padding: 10px 12px;
+      }
+
+      .message-avatar {
+        width: 28px;
+        height: 28px;
+      }
+
+      .message-image {
+        max-width: 200px;
+        max-height: 200px;
+      }
+
+      .chat-input {
+        padding: 12px 15px;
+        gap: 8px;
+      }
+
+      #message {
+        font-size: 16px;
+        padding: 10px 14px;
+      }
+
+      .file-upload-btn, #send {
+        width: 40px;
+        height: 40px;
+      }
+
+      .avatar-options {
+        right: -10px;
+        width: 200px;
+      }
+
+      #avatar-url {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .user-info-container {
+        flex-direction: column;
+        gap: 8px;
+        align-items: stretch;
+      }
+
+      .info-group {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .info-group label {
+        flex-shrink: 0;
+        width: 60px;
+      }
+
+      .info-group input,
+      .info-group select {
+        flex: 1;
+        max-width: 150px;
+      }
+    }
+
+    #avatar-file {
+      display: none;
+    }
+
+    .tooltip {
+      position: relative;
+    }
+
+    .tooltip::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: 125%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+      z-index: 1000;
+    }
+
+    .tooltip::before {
+      content: '';
+      position: absolute;
+      bottom: 115%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 5px solid transparent;
+      border-top-color: rgba(0, 0, 0, 0.8);
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+    }
+
+    .tooltip:hover::after,
+    .tooltip:hover::before {
+      opacity: 1;
+      visibility: visible;
+    }
+  </style>
+</head>
+<body>
+  <div class="chat-container">
+    <div class="chat-header">
+      <div class="header-left">
+        <div id="status">
+          <div class="status-indicator"></div>
+          <span class="status-text">Initializing...</span>
+        </div>
+        <div class="user-info-container">
+          <div class="info-group">
+            <label for="name">Name:</label>
+            <input type="text" id="name" placeholder="Your name" maxlength="20">
+          </div>
+          <div class="info-group">
+            <label for="gender">Gender:</label>
+            <select id="gender">
+              <option value="Unspecified">Unspecified</option>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+            </select>
+          </div>
+          <div class="info-group">
+            <label for="status-text">Status:</label>
+            <input type="text" id="status-text" placeholder="How are you?" maxlength="50">
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="avatar-container">
+          <div id="avatar" class="avatar-placeholder tooltip" data-tooltip="Click to change avatar">
+            <span class="material-icons">person</span>
+          </div>
+          <input type="file" id="avatar-file" accept="image/*">
+          <input type="text" id="avatar-url" placeholder="Enter avatar URL" style="display: none;">
+          <div class="avatar-options">
+            <button id="choose-file">
+              <span class="material-icons">image</span>
+              Upload Image
+            </button>
+            <button id="enter-url">
+              <span class="material-icons">link</span>
+              Enter URL
+            </button>
+            <button id="cancel-avatar">
+              <span class="material-icons">close</span>
+              Cancel
+            </button>
+          </div>
+        </div>
+        <div class="control-buttons">
+          <button id="notification-btn" class="control-btn notification tooltip" data-tooltip="Toggle notifications" style="display: none;">
+            <span class="material-icons">notifications</span>
+          </button>
+          <button id="disconnect-btn" class="control-btn disconnect tooltip" data-tooltip="Stop chat and find new partner" style="display: none;">
+            <span class="material-icons">close</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <div id="messages" class="chat-messages"></div>
+    
+    <div class="chat-input">
+      <input type="text" id="message" placeholder="Type your message..." maxlength="500">
+      <div class="input-controls">
+        <button class="file-upload-btn tooltip" data-tooltip="Send image">
+          <span class="material-icons">image</span>
+          <input type="file" id="image-file" accept="image/*">
+        </button>
+        <button id="send" class="tooltip" data-tooltip="Send message">
+          <span class="material-icons">send</span>
+        </button>
+      </div>
+    </div>
+</div>
+
+<script>
+// ==================== CONFIGURATION ====================
+const CONFIG = {
+  // Server endpoints
+  SIGNALING_URL: '/api/signaling', // Vercel deployment
+  
+  // Client direct Redis access (environment variables)
+  REDIS_REST_API_URL: "https://redis-19152.c290.ap-northeast-1-2.ec2.redns.redis-cloud.com",
+  REDIS_REST_API_TOKEN: "FGaTVeJwCJz8uIvZgsv8CjGurvumo6tc",
+  
+  // WebRTC Configuration
+  ICE_SERVERS: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ],
+  
+  // Timeouts and limits
+  MATCH_POLL_INTERVAL: 3000,
+  SIGNAL_POLL_INTERVAL: 1000,
+  ICE_POLL_INTERVAL: 1000,
+  CONNECTION_TIMEOUT: 30000,
+  MAX_RETRY_ATTEMPTS: 3,
+  
+  // User preferences
+  DEFAULT_TIMEZONE: getTimezone()
+};
+
+// ==================== GLOBAL STATE ====================
+let appState = {
+  // Connection state
+  connectionState: 'disconnected', // disconnected, searching, matched, signaling, connected
+  
+  // User info
+  userId: generateUserId(),
+  userName: '',
+  userGender: 'Unspecified',
+  userStatus: '',
+  userAvatar: '',
+  userTimezone: CONFIG.DEFAULT_TIMEZONE,
+  
+  // Match info
+  matchId: null,
+  partnerId: null,
+  partnerInfo: null,
+  isInitiator: false,
+  
+  // WebRTC
+  peerConnection: null,
+  dataChannel: null,
+  
+  // Polling intervals
+  matchPollInterval: null,
+  signalPollInterval: null,
+  icePollInterval: null,
+  
+  // Retry logic
+  retryCount: 0,
+  retryTimeout: null,
+  
+  // Notifications
+  notificationsEnabled: false,
+  lastNotificationTime: 0
+};
+
+// ==================== DOM ELEMENTS ====================
+const elements = {
+  // Status
+  statusEl: document.getElementById('status'),
+  statusIndicator: document.querySelector('.status-indicator'),
+  statusText: document.querySelector('.status-text'),
+  
+  // User info inputs
+  nameInput: document.getElementById('name'),
+  genderSelect: document.getElementById('gender'),
+  statusTextInput: document.getElementById('status-text'),
+  
+  // Avatar
+  avatarDiv: document.getElementById('avatar'),
+  avatarFileInput: document.getElementById('avatar-file'),
+  avatarUrlInput: document.getElementById('avatar-url'),
+  avatarOptions: document.querySelector('.avatar-options'),
+  chooseFileBtn: document.getElementById('choose-file'),
+  enterUrlBtn: document.getElementById('enter-url'),
+  cancelAvatarBtn: document.getElementById('cancel-avatar'),
+  
+  // Controls
+  disconnectBtn: document.getElementById('disconnect-btn'),
+  notificationBtn: document.getElementById('notification-btn'),
+  
+  // Chat
+  messagesEl: document.getElementById('messages'),
+  messageInput: document.getElementById('message'),
+  sendBtn: document.getElementById('send'),
+  imageInput: document.getElementById('image-file')
+};
+
+// ==================== INITIALIZATION ====================
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('[INIT] Starting WebRTC Chat Client');
+  
+  initializeApp();
+  setupEventListeners();
+  loadUserPreferences();
+  initializeNotifications();
+  
+  // Start matching process
+  startMatchFinding();
+});
+
+function initializeApp() {
+  updateStatus('Initializing...', 'searching');
+  
+  // Initialize user ID and basic info
+  if (!appState.userName) {
+    appState.userName = `User_${appState.userId.slice(-4)}`;
+    elements.nameInput.value = appState.userName;
+  }
+  
+  // Load saved preferences
+  const savedName = localStorage.getItem('chat_name');
+  const savedGender = localStorage.getItem('chat_gender');
+  const savedStatus = localStorage.getItem('chat_status');
+  const savedAvatar = localStorage.getItem('chat_avatar');
+  
+  if (savedName) {
+    appState.userName = savedName;
+    elements.nameInput.value = savedName;
+  }
+  
+  if (savedGender) {
+    appState.userGender = savedGender;
+    elements.genderSelect.value = savedGender;
+  }
+  
+  if (savedStatus) {
+    appState.userStatus = savedStatus;
+    elements.statusTextInput.value = savedStatus;
+  }
+  
+  if (savedAvatar) {
+    setAvatar(savedAvatar);
+  }
+  
+  console.log('[INIT] User ID:', appState.userId);
+  console.log('[INIT] Timezone:', appState.userTimezone);
+}
+
+function setupEventListeners() {
+  // User info inputs
+  elements.nameInput?.addEventListener('input', (e) => {
+    appState.userName = e.target.value.trim() || `User_${appState.userId.slice(-4)}`;
+    localStorage.setItem('chat_name', appState.userName);
+  });
+  
+  elements.genderSelect?.addEventListener('change', (e) => {
+    appState.userGender = e.target.value;
+    localStorage.setItem('chat_gender', appState.userGender);
+  });
+  
+  elements.statusTextInput?.addEventListener('input', (e) => {
+    appState.userStatus = e.target.value.trim();
+    localStorage.setItem('chat_status', appState.userStatus);
+  });
+  
+  // Avatar controls
+  elements.avatarDiv?.addEventListener('click', () => {
+    elements.avatarOptions.style.display = 
+      elements.avatarOptions.style.display === 'flex' ? 'none' : 'flex';
+  });
+  
+  elements.chooseFileBtn?.addEventListener('click', () => {
+    elements.avatarFileInput.click();
+    elements.avatarOptions.style.display = 'none';
+  });
+  
+  elements.enterUrlBtn?.addEventListener('click', () => {
+    const url = prompt('Enter avatar URL:');
+    if (url && url.trim()) {
+      setAvatar(url.trim());
+    }
+    elements.avatarOptions.style.display = 'none';
+  });
+  
+  elements.cancelAvatarBtn?.addEventListener('click', () => {
+    elements.avatarOptions.style.display = 'none';
+  });
+  
+  elements.avatarFileInput?.addEventListener('change', handleAvatarUpload);
+  
+  // Control buttons
+  elements.disconnectBtn?.addEventListener('click', handleDisconnect);
+  elements.notificationBtn?.addEventListener('click', toggleNotifications);
+  
+  // Chat input
+  elements.messageInput?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  
+  elements.sendBtn?.addEventListener('click', sendMessage);
+  elements.imageInput?.addEventListener('change', handleImageUpload);
+  
+  // Click outside to close avatar options
+  document.addEventListener('click', (e) => {
+    if (!elements.avatarDiv?.contains(e.target)) {
+      elements.avatarOptions.style.display = 'none';
+    }
+  });
+}
+
+// ==================== SIGNALING SERVER COMMUNICATION ====================
+async function callSignalingServer(data) {
+  try {
+    const response = await fetch(CONFIG.SIGNALING_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        userId: appState.userId,
+        timezone: appState.userTimezone,
+        ...data
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('[SIGNALING] Server call failed:', error);
+    throw error;
+  }
+}
+
+async function startMatchFinding() {
+  if (appState.connectionState !== 'disconnected') {
+    console.log('[MATCH] Already searching or connected');
+    return;
+  }
+  
+  try {
+    appState.connectionState = 'searching';
+    updateStatus('Looking for someone to chat with...', 'searching');
+    
+    const result = await callSignalingServer({ action: 'join-queue' });
+    
+    if (result.status === 'matched') {
+      // Got immediate match
+      handleMatchFound(result);
+    } else if (result.status === 'queued') {
+      // Added to queue, start polling
+      updateStatus(`Waiting in queue (${result.position})...`, 'searching');
+      startMatchPolling();
+    } else if (result.status === 'already_matched') {
+      // Resume existing match
+      handleMatchFound(result);
+    } else {
+      throw new Error(result.message || 'Failed to join queue');
+    }
+  } catch (error) {
+    console.error('[MATCH] Failed to start matching:', error);
+    handleConnectionError(error);
+  }
+}
+
+function startMatchPolling() {
+  if (appState.matchPollInterval) return;
+  
+  appState.matchPollInterval = setInterval(async () => {
+    try {
+      const result = await callSignalingServer({ action: 'poll-match' });
+      
+      if (result.status === 'matched') {
+        clearInterval(appState.matchPollInterval);
+        appState.matchPollInterval = null;
+        handleMatchFound(result);
+      } else if (result.status === 'waiting') {
+        updateStatus(`Waiting in queue (${result.position})...`, 'searching');
+      } else if (result.status === 'not_found') {
+        // Need to rejoin queue
+        clearInterval(appState.matchPollInterval);
+        appState.matchPollInterval = null;
+        setTimeout(() => startMatchFinding(), 2000);
+      }
+    } catch (error) {
+      console.error('[MATCH] Polling failed:', error);
+      // Continue polling on error
+    }
+  }, CONFIG.MATCH_POLL_INTERVAL);
+}
+
+function handleMatchFound(matchData) {
+  console.log('[MATCH] Found match:', matchData);
+  
+  appState.connectionState = 'matched';
+  appState.matchId = matchData.matchId;
+  appState.partnerId = matchData.partnerId;
+  appState.isInitiator = matchData.isInitiator;
+  
+  updateStatus('Found someone! Connecting...', 'signaling');
+  addSystemMessage(`Matched with someone! Setting up secure connection...`);
+  
+  // Show control buttons
+  elements.disconnectBtn.style.display = 'block';
+  
+  // Start WebRTC connection
+  initializeWebRTC();
+}
+
+// ==================== DIRECT REDIS COMMUNICATION ====================
+async function redisCall(operation, key, data = null) {
+  if (!CONFIG.REDIS_REST_API_URL || !CONFIG.REDIS_REST_API_TOKEN) {
+    throw new Error('Redis credentials not configured');
+  }
+  
+  const url = `${CONFIG.REDIS_REST_API_URL}/${operation}/${key}`;
+  const options = {
+    headers: {
+      'Authorization': `Bearer ${CONFIG.REDIS_REST_API_TOKEN}`,
+      'Content-Type': 'application/json'
+    }
+  };
+  
+  if (data !== null) {
+    options.method = 'POST';
+    options.body = JSON.stringify(typeof data === 'object' ? data : { value: data });
+  }
+  
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      throw new Error(`Redis ${operation} failed: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`[REDIS] ${operation} failed:`, error);
+    throw error;
+  }
+}
+
+async function sendSignalToRedis(type, signal) {
+  if (!appState.matchId || !appState.partnerId) return false;
+  
+  try {
+    const key = `signals:${appState.matchId}:${appState.partnerId}`;
+    await redisCall('hset', `${key}/${type}`, JSON.stringify(signal));
+    
+    // Set TTL
+    await redisCall('expire', key, 300);
+    
+    console.log(`[REDIS] Sent ${type} signal to partner`);
+    return true;
+  } catch (error) {
+    console.error('[REDIS] Failed to send signal:', error);
+    return false;
+  }
+}
+
+async function getSignalsFromRedis() {
+  if (!appState.matchId) return null;
+  
+  try {
+    const key = `signals:${appState.matchId}:${appState.userId}`;
+    const signals = await redisCall('hgetall', key);
+    
+    if (signals && Object.keys(signals).length > 0) {
+      // Clear signals after reading
+      await redisCall('del', key);
+      
+      // Parse JSON signals
+      const parsedSignals = {};
+      for (const [type, data] of Object.entries(signals)) {
+        if (type !== 'timestamp' && type !== 'from') {
+          try {
+            parsedSignals[type] = JSON.parse(data);
+          } catch (e) {
+            parsedSignals[type] = data;
+          }
+        }
+      }
+      
+      return parsedSignals;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('[REDIS] Failed to get signals:', error);
+    return null;
+  }
+}
+
+async function sendICEToRedis(candidate) {
+  if (!appState.matchId || !appState.partnerId) return false;
+  
+  try {
+    const key = `ice:${appState.matchId}:${appState.partnerId}`;
+    await redisCall('lpush', key, JSON.stringify({
+      candidate,
+      timestamp: Date.now(),
+      from: appState.userId
+    }));
+    
+    // Set TTL
+    await redisCall('expire', key, 300);
+    
+    return true;
+  } catch (error) {
+    console.error('[REDIS] Failed to send ICE:', error);
+    return false;
+  }
+}
+
+async function getICEFromRedis() {
+  if (!appState.matchId) return [];
+  
+  try {
+    const key = `ice:${appState.matchId}:${appState.userId}`;
+    const candidates = await redisCall('lrange', `${key}/0/-1`);
+    
+    if (candidates && candidates.length > 0) {
+      // Clear ICE after reading
+      await redisCall('del', key);
+      
+      // Parse candidates
+      return candidates.map(candidate => {
+        try {
+          return JSON.parse(candidate);
+        } catch (e) {
+          return { candidate, timestamp: Date.now(), from: 'unknown' };
+        }
+      });
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('[REDIS] Failed to get ICE:', error);
+    return [];
+  }
+}
+
+// ==================== WEBRTC CONNECTION ====================
+async function initializeWebRTC() {
+  try {
+    console.log('[WEBRTC] Initializing peer connection');
+    
+    // Create peer connection
+    appState.peerConnection = new RTCPeerConnection({
+      iceServers: CONFIG.ICE_SERVERS,
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'balanced'
+    });
+    
+    // Set up event handlers
+    setupPeerConnectionEvents();
+    
+    if (appState.isInitiator) {
+      // Initiator creates data channel and offer
+      appState.dataChannel = appState.peerConnection.createDataChannel('messages', {
+        ordered: true,
+        maxRetransmits: 3
+      });
+      setupDataChannelEvents();
+      
+      // Start signal polling first, then create offer
+      startSignalPolling();
+      setTimeout(() => createOffer(), 1000);
+    } else {
+      // Answerer just starts polling for offer
+      startSignalPolling();
+    }
+    
+    // Start ICE polling
+    startICEPolling();
+    
+    // Connection timeout
+    setTimeout(() => {
+      if (appState.connectionState === 'signaling') {
+        console.log('[WEBRTC] Connection timeout');
+        handleConnectionError(new Error('Connection timeout'));
+      }
+    }, CONFIG.CONNECTION_TIMEOUT);
+    
+  } catch (error) {
+    console.error('[WEBRTC] Failed to initialize:', error);
+    handleConnectionError(error);
+  }
+}
+
+function setupPeerConnectionEvents() {
+  const pc = appState.peerConnection;
+  
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      console.log('[WEBRTC] ICE candidate generated');
+      sendICEToRedis(event.candidate);
+    } else {
+      console.log('[WEBRTC] ICE gathering complete');
+    }
+  };
+  
+  pc.onconnectionstatechange = () => {
+    console.log('[WEBRTC] Connection state:', pc.connectionState);
+    
+    switch (pc.connectionState) {
+      case 'connected':
+        handleWebRTCConnected();
+        break;
+      case 'disconnected':
+      case 'failed':
+      case 'closed':
+        if (appState.connectionState === 'connected') {
+          handlePartnerDisconnect();
+        }
+        break;
+    }
+  };
+  
+  pc.ondatachannel = (event) => {
+    console.log('[WEBRTC] Data channel received');
+    appState.dataChannel = event.channel;
+    setupDataChannelEvents();
+  };
+}
+
+function setupDataChannelEvents() {
+  const dc = appState.dataChannel;
+  
+  dc.onopen = () => {
+    console.log('[WEBRTC] Data channel opened');
+    handleDataChannelOpen();
+  };
+  
+  dc.onclose = () => {
+    console.log('[WEBRTC] Data channel closed');
+    if (appState.connectionState === 'connected') {
+      handlePartnerDisconnect();
+    }
+  };
+  
+  dc.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleDataChannelMessage(data);
+    } catch (error) {
+      console.error('[WEBRTC] Failed to parse message:', error);
+    }
+  };
+  
+  dc.onerror = (error) => {
+    console.error('[WEBRTC] Data channel error:', error);
+  };
+}
+
+async function createOffer() {
+  try {
+    console.log('[WEBRTC] Creating offer');
+    
+    const offer = await appState.peerConnection.createOffer();
+    await appState.peerConnection.setLocalDescription(offer);
+    
+    await sendSignalToRedis('offer', offer);
+    console.log('[WEBRTC] Offer sent');
+  } catch (error) {
+    console.error('[WEBRTC] Failed to create offer:', error);
+    handleConnectionError(error);
+  }
+}
+
+async function handleOffer(offer) {
+  try {
+    console.log('[WEBRTC] Handling offer');
+    
+    await appState.peerConnection.setRemoteDescription(offer);
+    const answer = await appState.peerConnection.createAnswer();
+    await appState.peerConnection.setLocalDescription(answer);
+    
+    await sendSignalToRedis('answer', answer);
+    console.log('[WEBRTC] Answer sent');
+  } catch (error) {
+    console.error('[WEBRTC] Failed to handle offer:', error);
+    handleConnectionError(error);
+  }
+}
+
+async function handleAnswer(answer) {
+  try {
+    console.log('[WEBRTC] Handling answer');
+    await appState.peerConnection.setRemoteDescription(answer);
+  } catch (error) {
+    console.error('[WEBRTC] Failed to handle answer:', error);
+    handleConnectionError(error);
+  }
+}
+
+async function handleICECandidate(iceData) {
+  try {
+    await appState.peerConnection.addIceCandidate(iceData.candidate);
+  } catch (error) {
+    console.error('[WEBRTC] Failed to add ICE candidate:', error);
+  }
+}
+
+// ==================== POLLING LOOPS ====================
+function startSignalPolling() {
+  if (appState.signalPollInterval) return;
+  
+  appState.signalPollInterval = setInterval(async () => {
+    if (appState.connectionState !== 'signaling') {
+      clearInterval(appState.signalPollInterval);
+      appState.signalPollInterval = null;
+      return;
+    }
+    
+    try {
+      const signals = await getSignalsFromRedis();
+      
+      if (signals) {
+        if (signals.offer && !appState.isInitiator) {
+          await handleOffer(signals.offer);
+        }
+        
+        if (signals.answer && appState.isInitiator) {
+          await handleAnswer(signals.answer);
+        }
+      }
+    } catch (error) {
+      console.error('[POLLING] Signal polling failed:', error);
+    }
+  }, CONFIG.SIGNAL_POLL_INTERVAL);
+}
+
+function startICEPolling() {
+  if (appState.icePollInterval) return;
+  
+  appState.icePollInterval = setInterval(async () => {
+    if (appState.connectionState !== 'signaling') {
+      clearInterval(appState.icePollInterval);
+      appState.icePollInterval = null;
+      return;
+    }
+    
+    try {
+      const candidates = await getICEFromRedis();
+      
+      for (const candidateData of candidates) {
+        await handleICECandidate(candidateData);
+      }
+    } catch (error) {
+      console.error('[POLLING] ICE polling failed:', error);
+    }
+  }, CONFIG.ICE_POLL_INTERVAL);
+}
+
+// ==================== CONNECTION EVENTS ====================
+function handleWebRTCConnected() {
+  appState.connectionState = 'connected';
+  updateStatus('Connected! Say hello 👋', 'connected');
+  
+  // Clear polling intervals
+  clearInterval(appState.signalPollInterval);
+  clearInterval(appState.icePollInterval);
+  appState.signalPollInterval = null;
+  appState.icePollInterval = null;
+  
+  // Show notification button
+  elements.notificationBtn.style.display = 'block';
+  
+  // Send user info
+  sendUserInfo();
+  
+  // Show notification
+  showNotification('Chat Connected!', 'You are now connected with someone. Start chatting!', 'connection');
+}
+
+function handleDataChannelOpen() {
+  console.log('[CHAT] Data channel ready');
+  addSystemMessage('You\'re now connected! Start chatting...');
+  
+  // Enable message input
+  elements.messageInput.disabled = false;
+  elements.sendBtn.disabled = false;
+  elements.messageInput.focus();
+}
+
+function sendUserInfo() {
+  if (!appState.dataChannel || appState.dataChannel.readyState !== 'open') return;
+  
+  const userInfo = {
+    type: 'user-info',
+    name: appState.userName,
+    gender: appState.userGender,
+    status: appState.userStatus,
+    avatar: appState.userAvatar,
+    timezone: appState.userTimezone
+  };
+  
+  try {
+    appState.dataChannel.send(JSON.stringify(userInfo));
+    console.log('[CHAT] User info sent');
+  } catch (error) {
+    console.error('[CHAT] Failed to send user info:', error);
+  }
+}
+
+function handleDataChannelMessage(data) {
+  switch (data.type) {
+    case 'user-info':
+      appState.partnerInfo = data;
+      addSystemMessage(`${data.name || 'Anonymous'} joined the chat!`);
+      showNotification('Partner Joined!', `${data.name || 'Anonymous'} has joined the chat.`, 'connection');
+      
+      // Send automatic greeting
+      setTimeout(() => sendGreeting(), 1000);
+      break;
+      
+    case 'message':
+      addMessage(data.content, false, data.name, data.avatar);
+      showNotification(`${data.name || 'Partner'}`, data.content, 'message');
+      break;
+      
+    case 'image':
+      addImageMessage(data.imageData, false, data.name, data.avatar);
+      showNotification(`${data.name || 'Partner'}`, 'Sent an image', 'message');
+      break;
+      
+    case 'greeting':
+      addGreetingMessage(data.name, data.content, data.avatar, false);
+      showNotification(`${data.name} says hello!`, data.content, 'message');
+      break;
+      
+    case 'ping':
+      // Respond to ping
+      if (appState.dataChannel && appState.dataChannel.readyState === 'open') {
+        appState.dataChannel.send(JSON.stringify({
+          type: 'pong',
+          timestamp: Date.now()
+        }));
+      }
+      break;
+  }
+}
+
+function sendGreeting() {
+  if (!appState.dataChannel || appState.dataChannel.readyState !== 'open') return;
+  
+  const greetings = [
+    `Hi there! I'm ${appState.userName}`,
+    `Hello! Nice to meet you, I'm ${appState.userName}`,
+    `Hey! ${appState.userName} here`,
+    `Hi! I'm ${appState.userName}, nice to connect!`
+  ];
+  
+  let greeting = greetings[Math.floor(Math.random() * greetings.length)];
+  
+  if (appState.userGender && appState.userGender !== 'Unspecified') {
+    greeting += ` (${appState.userGender})`;
+  }
+  
+  if (appState.userStatus && appState.userStatus.trim()) {
+    greeting += `. ${appState.userStatus}`;
+  }
+  
+  const greetingData = {
+    type: 'greeting',
+    name: appState.userName,
+    gender: appState.userGender,
+    status: appState.userStatus,
+    avatar: appState.userAvatar,
+    content: greeting
+  };
+  
+  try {
+    appState.dataChannel.send(JSON.stringify(greetingData));
+    addGreetingMessage(appState.userName, greeting, appState.userAvatar, true);
+  } catch (error) {
+    console.error('[CHAT] Failed to send greeting:', error);
+  }
+}
+
+// ==================== CHAT FUNCTIONS ====================
+function sendMessage() {
+  if (!appState.dataChannel || appState.dataChannel.readyState !== 'open') return;
+  
+  const message = elements.messageInput.value.trim();
+  if (!message) return;
+  
+  const messageData = {
+    type: 'message',
+    content: message,
+    name: appState.userName,
+    avatar: appState.userAvatar,
+    timestamp: Date.now()
+  };
+  
+  try {
+    appState.dataChannel.send(JSON.stringify(messageData));
+    addMessage(message, true, appState.userName, appState.userAvatar);
+    elements.messageInput.value = '';
+  } catch (error) {
+    console.error('[CHAT] Failed to send message:', error);
+    addSystemMessage('Failed to send message. Connection may be unstable.');
+  }
+}
+
+function addMessage(content, isYou, name, avatar) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `message ${isYou ? 'message-you' : 'message-other'}`;
+  
+  let avatarImg = '';
+  if (avatar) {
+    avatarImg = `<img src="${avatar}" alt="${name}" class="message-avatar" onerror="this.style.display='none'">`;
+  }
+  
+  let genderBadge = '';
+  if (isYou && appState.userGender && appState.userGender !== 'Unspecified') {
+    genderBadge = `<span class="gender-badge">${appState.userGender}</span>`;
+  } else if (!isYou && appState.partnerInfo && appState.partnerInfo.gender && appState.partnerInfo.gender !== 'Unspecified') {
+    genderBadge = `<span class="gender-badge">${appState.partnerInfo.gender}</span>`;
+  }
+  
+  messageDiv.innerHTML = `
+    ${avatarImg}
+    <div class="message-content">
+      <div class="message-name">
+        ${name || (isYou ? 'You' : 'Partner')}
+        ${genderBadge}
+      </div>
+      <div class="message-text">${escapeHtml(content)}</div>
+    </div>
+  `;
+  
+  elements.messagesEl.appendChild(messageDiv);
+  scrollToBottom();
+}
+
+function addImageMessage(imageData, isYou, name, avatar) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `message ${isYou ? 'message-you' : 'message-other'}`;
+  
+  let avatarImg = '';
+  if (avatar) {
+    avatarImg = `<img src="${avatar}" alt="${name}" class="message-avatar" onerror="this.style.display='none'">`;
+  }
+  
+  messageDiv.innerHTML = `
+    ${avatarImg}
+    <div class="message-content">
+      <div class="message-name">${name || (isYou ? 'You' : 'Partner')}</div>
+      <img src="${imageData}" alt="Shared image" class="message-image" onclick="openImageModal(this.src)">
+    </div>
+  `;
+  
+  elements.messagesEl.appendChild(messageDiv);
+  scrollToBottom();
+}
+
+function addGreetingMessage(name, content, avatar, isYou) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `message message-greeting ${isYou ? 'message-you' : 'message-other'}`;
+  
+  let avatarImg = '';
+  if (avatar) {
+    avatarImg = `<img src="${avatar}" alt="${name}" class="message-avatar" onerror="this.style.display='none'">`;
+  }
+  
+  messageDiv.innerHTML = `
+    ${avatarImg}
+    <div class="message-content">
+      <div class="message-name">${name} ${isYou ? '(You)' : ''}</div>
+      <div class="message-text">${escapeHtml(content)}</div>
+    </div>
+  `;
+  
+  elements.messagesEl.appendChild(messageDiv);
+  scrollToBottom();
+}
+
+function addSystemMessage(message) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message message-info';
+  messageDiv.innerHTML = `<div class="message-text">${escapeHtml(message)}</div>`;
+  
+  elements.messagesEl.appendChild(messageDiv);
+  scrollToBottom();
+}
+
+// ==================== ERROR HANDLING ====================
+function handleConnectionError(error) {
+  console.error('[ERROR] Connection error:', error);
+  
+  appState.retryCount++;
+  
+  if (appState.retryCount >= CONFIG.MAX_RETRY_ATTEMPTS) {
+    updateStatus('Connection failed. Please refresh the page.', 'error');
+    addSystemMessage('Unable to connect. Please refresh the page to try again.');
+    return;
+  }
+  
+  const retryDelay = Math.pow(2, appState.retryCount - 1) * 2000; // 2s, 4s, 8s
+  updateStatus(`Connection failed. Retrying in ${Math.round(retryDelay/1000)}s... (${appState.retryCount}/${CONFIG.MAX_RETRY_ATTEMPTS})`, 'error');
+  
+  // Clear any existing timeouts and intervals
+  clearAllIntervals();
+  
+  // Retry after delay
+  appState.retryTimeout = setTimeout(() => {
+    appState.connectionState = 'disconnected';
+    startMatchFinding();
+  }, retryDelay);
+}
+
+function handlePartnerDisconnect() {
+  console.log('[DISCONNECT] Partner disconnected');
+  
+  appState.connectionState = 'disconnected';
+  updateStatus('Partner disconnected. Looking for someone new...', 'searching');
+  addSystemMessage('Your chat partner has left. Finding someone new...');
+  
+  showNotification('Partner Disconnected', 'Your chat partner has left the conversation.', 'connection');
+  
+  // Hide control buttons
+  elements.disconnectBtn.style.display = 'none';
+  elements.notificationBtn.style.display = 'none';
+  
+  // Clean up WebRTC
+  cleanupWebRTC();
+  
+  // Start new match after brief delay
+  setTimeout(() => {
+    clearMessages();
+    startMatchFinding();
+  }, 2000);
+}
+
+async function handleDisconnect() {
+  console.log('[DISCONNECT] User initiated disconnect');
+  
+  try {
+    // Notify server
+    await callSignalingServer({ action: 'disconnect' });
+    
+    // Clean up
+    appState.connectionState = 'disconnected';
+    updateStatus('Disconnected. Looking for someone new...', 'searching');
+    addSystemMessage('You disconnected. Finding someone new...');
+    
+    // Hide control buttons
+    elements.disconnectBtn.style.display = 'none';
+    elements.notificationBtn.style.display = 'none';
+    
+    // Clean up WebRTC and Redis
+    await cleanupConnection();
+    
+    // Start new match
+    setTimeout(() => {
+      clearMessages();
+      appState.retryCount = 0; // Reset retry counter
+      startMatchFinding();
+    }, 1000);
+    
+  } catch (error) {
+    console.error('[DISCONNECT] Failed to disconnect cleanly:', error);
+    // Force disconnect anyway
+    location.reload();
+  }
+}
+
+// ==================== CLEANUP FUNCTIONS ====================
+function clearAllIntervals() {
+  if (appState.matchPollInterval) {
+    clearInterval(appState.matchPollInterval);
+    appState.matchPollInterval = null;
+  }
+  
+  if (appState.signalPollInterval) {
+    clearInterval(appState.signalPollInterval);
+    appState.signalPollInterval = null;
+  }
+  
+  if (appState.icePollInterval) {
+    clearInterval(appState.icePollInterval);
+    appState.icePollInterval = null;
+  }
+  
+  if (appState.retryTimeout) {
+    clearTimeout(appState.retryTimeout);
+    appState.retryTimeout = null;
+  }
+}
+
+function cleanupWebRTC() {
+  if (appState.dataChannel) {
+    appState.dataChannel.close();
+    appState.dataChannel = null;
+  }
+  
+  if (appState.peerConnection) {
+    appState.peerConnection.close();
+    appState.peerConnection = null;
+  }
+  
+  clearAllIntervals();
+}
+
+async function cleanupConnection() {
+  cleanupWebRTC();
+  
+  // Clean up Redis data if we have match info
+  if (appState.matchId && CONFIG.REDIS_REST_API_URL && CONFIG.REDIS_REST_API_TOKEN) {
+    try {
+      const cleanupPromises = [
+        redisCall('del', `signals:${appState.matchId}:${appState.userId}`),
+        redisCall('del', `signals:${appState.matchId}:${appState.partnerId}`),
+        redisCall('del', `ice:${appState.matchId}:${appState.userId}`),
+        redisCall('del', `ice:${appState.matchId}:${appState.partnerId}`)
+      ];
+      
+      await Promise.allSettled(cleanupPromises);
+      console.log('[CLEANUP] Redis data cleaned');
+    } catch (error) {
+      console.error('[CLEANUP] Failed to clean Redis:', error);
+    }
+  }
+  
+  // Reset state
+  appState.matchId = null;
+  appState.partnerId = null;
+  appState.partnerInfo = null;
+  appState.isInitiator = false;
+}
+
+// ==================== UI HELPER FUNCTIONS ====================
+function updateStatus(message, type) {
+  if (elements.statusText) {
+    elements.statusText.textContent = message;
+  }
+  
+  if (elements.statusIndicator) {
+    elements.statusIndicator.className = `status-indicator ${type}`;
+  }
+  
+  console.log(`[STATUS] ${type.toUpperCase()}: ${message}`);
+}
+
+function clearMessages() {
+  if (elements.messagesEl) {
+    elements.messagesEl.innerHTML = '';
+  }
+}
+
+function scrollToBottom() {
+  if (elements.messagesEl) {
+    elements.messagesEl.scrollTop = elements.messagesEl.scrollHeight;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ==================== AVATAR HANDLING ====================
+function handleAvatarUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  if (file.size > 5 * 1024 * 1024) { // 5MB limit
+    alert('Avatar image must be smaller than 5MB');
+    return;
+  }
+  
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    setAvatar(e.target.result);
+  };
+  reader.readAsDataURL(file);
+}
+
+function setAvatar(src) {
+  appState.userAvatar = src;
+  localStorage.setItem('chat_avatar', src);
+  
+  if (elements.avatarDiv) {
+    elements.avatarDiv.style.backgroundImage = `url(${src})`;
+    elements.avatarDiv.innerHTML = ''; // Remove placeholder icon
+    elements.avatarDiv.classList.remove('avatar-placeholder');
+  }
+}
+
+// ==================== IMAGE SHARING ====================
+function handleImageUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  if (file.size > 10 * 1024 * 1024) { // 10MB limit
+    alert('Image must be smaller than 10MB');
+    return;
+  }
+  
+  if (!appState.dataChannel || appState.dataChannel.readyState !== 'open') {
+    alert('Cannot send image: not connected to partner');
+    return;
+  }
+  
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const imageData = {
+      type: 'image',
+      imageData: e.target.result,
+      name: appState.userName,
+      avatar: appState.userAvatar,
+      timestamp: Date.now()
+    };
+    
+    try {
+      appState.dataChannel.send(JSON.stringify(imageData));
+      addImageMessage(e.target.result, true, appState.userName, appState.userAvatar);
+    } catch (error) {
+      console.error('[CHAT] Failed to send image:', error);
+      alert('Failed to send image. Connection may be unstable.');
+    }
+  };
+  reader.readAsDataURL(file);
+  
+  // Clear input
+  event.target.value = '';
+}
+
+function openImageModal(src) {
+  // Create modal for full-size image viewing
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    cursor: pointer;
+  `;
+  
+  const img = document.createElement('img');
+  img.src = src;
+  img.style.cssText = `
+    max-width: 90%;
+    max-height: 90%;
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  `;
+  
+  modal.appendChild(img);
+  document.body.appendChild(modal);
+  
+  modal.onclick = () => {
+    document.body.removeChild(modal);
+  };
+}
+
+// ==================== NOTIFICATIONS ====================
+async function initializeNotifications() {
+  const savedPref = localStorage.getItem('notificationsEnabled');
+  appState.notificationsEnabled = savedPref === 'true';
+  
+  if ('Notification' in window) {
+    const permission = Notification.permission;
+    
+    if (permission === 'default' && appState.notificationsEnabled) {
+      try {
+        const newPermission = await Notification.requestPermission();
+        appState.notificationsEnabled = newPermission === 'granted';
+      } catch (error) {
+        console.error('Notification permission error:', error);
+        appState.notificationsEnabled = false;
+      }
+    } else {
+      appState.notificationsEnabled = appState.notificationsEnabled && permission === 'granted';
+    }
+  } else {
+    appState.notificationsEnabled = false;
+  }
+  
+  updateNotificationButtonState();
+}
+
+async function toggleNotifications() {
+  if ('Notification' in window) {
+    const permission = Notification.permission;
+    
+    if (permission === 'denied') {
+      alert('Notifications are blocked. Please enable them in your browser settings.');
+      return;
+    }
+    
+    if (permission === 'default') {
+      try {
+        const newPermission = await Notification.requestPermission();
+        if (newPermission !== 'granted') {
+          alert('Notification permission denied.');
+          return;
+        }
+      } catch (error) {
+        alert('Could not request notification permission.');
+        return;
+      }
+    }
+    
+    appState.notificationsEnabled = !appState.notificationsEnabled;
+    localStorage.setItem('notificationsEnabled', appState.notificationsEnabled.toString());
+  } else {
+    alert('Notifications are not supported in this browser.');
+    return;
+  }
+  
+  updateNotificationButtonState();
+  
+  if (appState.notificationsEnabled) {
+    showNotification('Notifications enabled', 'You will receive notifications for new messages.', 'system');
+  }
+}
+
+function updateNotificationButtonState() {
+  if (elements.notificationBtn) {
+    if (appState.notificationsEnabled) {
+      elements.notificationBtn.classList.remove('disabled');
+      elements.notificationBtn.setAttribute('data-tooltip', 'Notifications enabled');
+    } else {
+      elements.notificationBtn.classList.add('disabled');
+      elements.notificationBtn.setAttribute('data-tooltip', 'Notifications disabled');
+    }
+  }
+}
+
+function shouldShowNotification() {
+  if (!appState.notificationsEnabled) return false;
+  if (!appState.dataChannel || appState.dataChannel.readyState !== 'open') return false;
+  
+  const now = Date.now();
+  if (now - appState.lastNotificationTime < 3000) return false; // Rate limit
+  
+  // Don't show if page is focused
+  if (typeof document.hasFocus === 'function' && document.hasFocus()) return false;
+  if (typeof document.hidden !== 'undefined' && !document.hidden) return false;
+  
+  return true;
+}
+
+function showNotification(title, body, type = 'message') {
+  if (!shouldShowNotification() && type !== 'system') return;
+  
+  const now = Date.now();
+  appState.lastNotificationTime = now;
+  
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const notification = new Notification(title, {
+        body: body,
+        tag: type,
+        requireInteraction: type === 'connection',
+        silent: type === 'system',
+        timestamp: now,
+        icon: '/favicon.ico'
+      });
+      
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+        if (elements.messageInput) elements.messageInput.focus();
+      };
+      
+      setTimeout(() => {
+        notification.close();
+      }, type === 'connection' ? 10000 : 5000);
+      
+    } catch (error) {
+      console.error('Web notification error:', error);
+    }
+  }
+}
+
+// ==================== UTILITY FUNCTIONS ====================
+function generateUserId() {
+  return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+}
+
+function getTimezone() {
+  try {
+    const offset = -new Date().getTimezoneOffset() / 60;
+    return `gmt${offset >= 0 ? '+' : ''}${offset}`;
+  } catch (error) {
+    return 'global';
+  }
+}
+
+function loadUserPreferences() {
+  // Load and apply saved preferences
+  const preferences = {
+    name: localStorage.getItem('chat_name'),
+    gender: localStorage.getItem('chat_gender'),
+    status: localStorage.getItem('chat_status'),
+    avatar: localStorage.getItem('chat_avatar'),
+    notifications: localStorage.getItem('notificationsEnabled') === 'true'
+  };
+  
+  // Apply preferences to state and UI
+  if (preferences.name) {
+    appState.userName = preferences.name;
+    if (elements.nameInput) elements.nameInput.value = preferences.name;
+  }
+  
+  if (preferences.gender) {
+    appState.userGender = preferences.gender;
+    if (elements.genderSelect) elements.genderSelect.value = preferences.gender;
+  }
+  
+  if (preferences.status) {
+    appState.userStatus = preferences.status;
+    if (elements.statusTextInput) elements.statusTextInput.value = preferences.status;
+  }
+  
+  if (preferences.avatar) {
+    setAvatar(preferences.avatar);
+  }
+  
+  appState.notificationsEnabled = preferences.notifications;
+}
+
+// ==================== ERROR RECOVERY ====================
+window.addEventListener('beforeunload', async () => {
+  // Attempt cleanup before page unload
+  if (appState.connectionState !== 'disconnected') {
+    try {
+      await callSignalingServer({ action: 'disconnect' });
+    } catch (error) {
+      console.error('Failed to cleanup on unload:', error);
+    }
+  }
+});
+
+window.addEventListener('online', () => {
+  console.log('[NETWORK] Connection restored');
+  if (appState.connectionState === 'disconnected') {
+    addSystemMessage('Connection restored. Searching for someone to chat with...');
+    setTimeout(() => startMatchFinding(), 1000);
+  }
+});
+
+window.addEventListener('offline', () => {
+  console.log('[NETWORK] Connection lost');
+  updateStatus('No internet connection', 'error');
+  addSystemMessage('Internet connection lost. Please check your connection.');
+});
+
+// ==================== DEVELOPMENT HELPERS ====================
+if (typeof window !== 'undefined') {
+  // Expose app state for debugging
+  window.debugWebRTC = {
+    state: appState,
+    config: CONFIG,
+    functions: {
+      startMatch: startMatchFinding,
+      disconnect: handleDisconnect,
+      cleanup: cleanupConnection,
+      sendMessage: sendMessage
+    }
+  };
+  
+  console.log('[DEBUG] WebRTC app ready. Use window.debugWebRTC for debugging.');
+}
+</script>
+  
+
+</body></html>
