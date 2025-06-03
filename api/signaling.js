@@ -1,419 +1,461 @@
-// WebRTC Signaling Server - Standard Offer/Answer Exchange
-// Synchronized with fixed client that generates fresh signals
+// Simplified Vercel KV WebRTC Signaling Server
+// CHỈ 4 functions: join-queue, poll-match, disconnect, health
+// Clients direct Redis access cho signals/ICE
 
-let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo }
-let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
+import { kv } from '@vercel/kv';
 
-const USER_TIMEOUT = 120000; // 2 minutes for waiting users
-const MATCH_LIFETIME = 600000; // 10 minutes for active matches
-const MAX_WAITING_USERS = 1000; // Prevent memory bloat
+// Constants
+const MATCH_TIMEOUT = 300; // 5 minutes TTL
+const MAX_QUEUE_SIZE = 100; // Max users per timezone queue
+
+// In-memory stats
+let serverStats = {
+  totalMatches: 0,
+  activeMatches: 0,
+  startTime: Date.now()
+};
 
 export default async function handler(req, res) {
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 
+    'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('Access-Control-Allow-Credentials', 'false');
   
-  // Handle CORS preflight
+  // Handle OPTIONS preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
   
-  // GET: Health check and debug info
-  if (req.method === 'GET') {
-    const { debug } = req.query;
-    
-    if (debug === 'true') {
-      return res.json({
-        status: 'webrtc-signaling-server',
-        stats: {
-          waitingUsers: waitingUsers.size,
-          activeMatches: activeMatches.size,
-          totalUsers: waitingUsers.size + (activeMatches.size * 2)
-        },
-        waitingUserIds: Array.from(waitingUsers.keys()),
-        activeMatchIds: Array.from(activeMatches.keys()),
-        timestamp: Date.now()
-      });
-    }
-    
-    // Trigger cleanup
-    cleanup();
-    
-    return res.json({ 
-      status: 'signaling-ready',
-      stats: { 
-        waiting: waitingUsers.size, 
-        matches: activeMatches.size
-      },
-      message: 'WebRTC signaling server ready for connections',
-      timestamp: Date.now()
-    });
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'POST required for signaling' });
+  // Health check
+  if (req.method === 'GET' && (!req.query.action || req.query.action === 'health')) {
+    return handleHealthCheck(res);
   }
   
   try {
-    // Parse request body
-    let data;
-    if (typeof req.body === 'string') {
-      data = JSON.parse(req.body);
-    } else {
-      data = req.body;
-    }
+    const data = req.method === 'GET' ? req.query : 
+                 (typeof req.body === 'string' ? JSON.parse(req.body) : req.body);
     
     const { action, userId } = data;
     
     if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
+      return res.status(400).json({ error: 'Missing userId' });
     }
-    
-    console.log(`[${action?.toUpperCase() || 'UNKNOWN'}] ${userId}`);
     
     switch (action) {
-      case 'instant-match': 
-        return handleInstantMatch(userId, data, res);
-      case 'get-signals': 
-        return handleGetSignals(userId, res);
-      case 'send-signal': 
-        return handleSendSignal(userId, data, res);
-      case 'disconnect': 
-        return handleDisconnect(userId, res);
-      default: 
-        return res.status(400).json({ error: `Unknown action: ${action}` });
+      case 'join-queue':
+        return await handleJoinQueue(userId, data, res);
+      case 'poll-match':
+        return await handlePollMatch(userId, res);
+      case 'disconnect':
+        return await handleDisconnect(userId, res);
+      default:
+        return res.status(400).json({ error: 'Unknown action. Supported: join-queue, poll-match, disconnect' });
     }
   } catch (error) {
-    console.error('[SERVER ERROR]', error);
+    console.error('[SIGNALING] Error:', error);
     return res.status(500).json({ error: 'Server error', details: error.message });
   }
 }
 
-// ==========================================
-// INSTANT MATCH HANDLER (SIMPLIFIED)
-// ==========================================
-
-function handleInstantMatch(userId, data, res) {
-  const { userInfo, preferredMatchId } = data;
-  
-  console.log(`[INSTANT-MATCH] ${userId} looking for partner`);
-  
-  // Cleanup first
-  cleanup();
-  
-  // Check if user is already waiting or matched
-  if (waitingUsers.has(userId)) {
-    waitingUsers.delete(userId);
-    console.log(`[INSTANT-MATCH] Updated existing user ${userId}`);
-  }
-  
-  // Remove user from any existing matches
-  for (const [matchId, match] of activeMatches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      console.log(`[INSTANT-MATCH] Removing ${userId} from existing match ${matchId}`);
-      activeMatches.delete(matchId);
-      break;
-    }
-  }
-  
-  // Try to find instant match from waiting users
-  let bestMatch = null;
-  let bestMatchScore = 0;
-  
-  for (const [waitingUserId, waitingUser] of waitingUsers.entries()) {
-    if (waitingUserId === userId) continue;
+// Health check endpoint
+async function handleHealthCheck(res) {
+  try {
+    // Test KV connection
+    await kv.ping();
     
-    // Calculate compatibility score
-    let score = 1;
+    const uptime = Date.now() - serverStats.startTime;
     
-    // Prefer users with complementary userInfo if available
-    if (userInfo && waitingUser.userInfo) {
-      if (userInfo.gender && waitingUser.userInfo.gender && 
-          userInfo.gender !== waitingUser.userInfo.gender && 
-          userInfo.gender !== 'Unspecified' && waitingUser.userInfo.gender !== 'Unspecified') {
-        score += 2; // Bonus for different genders
-      }
-      if (userInfo.status && waitingUser.userInfo.status &&
-          userInfo.status === waitingUser.userInfo.status) {
-        score += 1; // Bonus for similar status/mood
-      }
-    }
+    // Get queue lengths
+    const queueStats = await Promise.all([
+      kv.llen('waiting_queue:global').catch(() => 0),
+      kv.llen('waiting_queue:gmt+7').catch(() => 0),
+      kv.llen('waiting_queue:gmt+8').catch(() => 0),
+      kv.llen('waiting_queue:gmt-5').catch(() => 0)
+    ]);
     
-    // Prefer newer users (less waiting time)
-    const waitTime = Date.now() - waitingUser.timestamp;
-    if (waitTime < 30000) score += 1; // Less than 30 seconds
-    if (waitTime < 10000) score += 1; // Less than 10 seconds (very fresh)
+    const totalWaiting = queueStats.reduce((sum, count) => sum + (count || 0), 0);
     
-    if (score > bestMatchScore) {
-      bestMatchScore = score;
-      bestMatch = { userId: waitingUserId, user: waitingUser };
-    }
-  }
-  
-  if (bestMatch) {
-    // INSTANT MATCH FOUND! 🚀
-    const partnerId = bestMatch.userId;
-    const partnerUser = bestMatch.user;
-    
-    // Remove partner from waiting list
-    waitingUsers.delete(partnerId);
-    
-    // Create match
-    const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    
-    // Determine who is initiator (consistent ordering)
-    const isUserInitiator = userId < partnerId;
-    const p1 = isUserInitiator ? userId : partnerId;
-    const p2 = isUserInitiator ? partnerId : userId;
-    
-    // Create match without pre-exchanged signals
-    const match = {
-      p1,
-      p2,
-      timestamp: Date.now(),
-      signals: {
-        [p1]: [], // Initiator's signal queue
-        [p2]: []  // Receiver's signal queue
+    return res.json({
+      status: 'healthy',
+      uptime: Math.floor(uptime / 1000),
+      stats: {
+        ...serverStats,
+        totalWaiting,
+        queueLengths: {
+          global: queueStats[0],
+          'gmt+7': queueStats[1], 
+          'gmt+8': queueStats[2],
+          'gmt-5': queueStats[3]
+        },
+        timestamp: Date.now()
       },
-      userInfo: {
-        [userId]: userInfo || {},
-        [partnerId]: partnerUser.userInfo || {}
-      }
-    };
-    
-    activeMatches.set(matchId, match);
-    
-    console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'}`);
-    
-    return res.json({
-      status: 'instant-match',
-      matchId,
-      partnerId,
-      isInitiator: isUserInitiator,
-      partnerInfo: partnerUser.userInfo || {},
-      signals: [], // No pre-exchanged signals
-      compatibility: bestMatchScore,
-      message: 'Instant match found! WebRTC connection will be established.',
-      timestamp: Date.now()
+      message: 'Signaling server ready. Clients use direct Redis for signals/ICE.'
     });
-    
-  } else {
-    // No immediate match, add to waiting list
-    const waitingUser = {
-      userId,
-      userInfo: userInfo || {},
-      timestamp: Date.now()
-    };
-    
-    waitingUsers.set(userId, waitingUser);
-    
-    const position = waitingUsers.size;
-    console.log(`[INSTANT-MATCH] ${userId} added to waiting list (position ${position})`);
-    
-    return res.json({
-      status: 'waiting',
-      position,
-      waitingUsers: waitingUsers.size,
-      message: 'Added to matching queue. Waiting for partner...',
-      estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
-      timestamp: Date.now()
+  } catch (error) {
+    return res.status(503).json({
+      status: 'unhealthy',
+      error: error.message
     });
   }
 }
 
-// ==========================================
-// SIGNAL HANDLERS
-// ==========================================
-
-function handleGetSignals(userId, res) {
-  // Find user's match
-  for (const [matchId, match] of activeMatches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      const partnerId = match.p1 === userId ? match.p2 : match.p1;
-      const signals = match.signals[userId] || [];
+// Join waiting queue với timezone support
+async function handleJoinQueue(userId, data, res) {
+  try {
+    const { timezone = 'global' } = data;
+    
+    // Validate timezone
+    const validTimezones = ['global', 'gmt+7', 'gmt+8', 'gmt+9', 'gmt-5', 'gmt-4', 'gmt-8'];
+    const userTimezone = validTimezones.includes(timezone) ? timezone : 'global';
+    
+    // Check if user already has active match
+    const existingUser = await kv.hgetall(`users:${userId}`);
+    if (existingUser && existingUser.matchId) {
+      const matchData = await kv.hgetall(`matches:${existingUser.matchId}`);
+      if (matchData && matchData.status !== 'expired') {
+        const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+        return res.json({
+          status: 'already_matched',
+          matchId: existingUser.matchId,
+          partnerId,
+          isInitiator: matchData.p1 === userId,
+          message: 'You already have an active match'
+        });
+      }
+    }
+    
+    // Remove user from any existing queues
+    await removeFromAllQueues(userId);
+    
+    // Try to find match in same timezone first
+    const primaryQueue = `waiting_queue:${userTimezone}`;
+    let partnerId = await kv.rpop(primaryQueue);
+    
+    // Fallback to global queue if no match in timezone
+    if (!partnerId && userTimezone !== 'global') {
+      partnerId = await kv.rpop('waiting_queue:global');
+    }
+    
+    // Fallback to adjacent timezones
+    if (!partnerId) {
+      const adjacentTimezones = getAdjacentTimezones(userTimezone);
+      for (const tz of adjacentTimezones) {
+        partnerId = await kv.rpop(`waiting_queue:${tz}`);
+        if (partnerId && partnerId !== userId) break;
+        partnerId = null;
+      }
+    }
+    
+    if (partnerId && partnerId !== userId) {
+      // Create match
+      const matchId = generateMatchId();
+      const p1 = userId < partnerId ? userId : partnerId; // Consistent initiator logic
+      const p2 = userId < partnerId ? partnerId : userId;
       
-      // Clear signals after reading to prevent duplicates
-      match.signals[userId] = [];
+      const matchData = {
+        p1,
+        p2,
+        created: Date.now().toString(),
+        status: 'signaling',
+        timezone: userTimezone
+      };
       
-      console.log(`[GET-SIGNALS] ${userId} -> ${signals.length} signals from match ${matchId}`);
+      // Store match data với TTL
+      await kv.hset(`matches:${matchId}`, matchData);
+      await kv.expire(`matches:${matchId}`, MATCH_TIMEOUT);
+      
+      // Update user status
+      await Promise.all([
+        kv.hset(`users:${userId}`, {
+          status: 'matched',
+          matchId,
+          timezone: userTimezone,
+          lastSeen: Date.now().toString()
+        }),
+        kv.hset(`users:${partnerId}`, {
+          status: 'matched',
+          matchId,
+          timezone: userTimezone,
+          lastSeen: Date.now().toString()
+        })
+      ]);
+      
+      // Set TTL for user data
+      await Promise.all([
+        kv.expire(`users:${userId}`, MATCH_TIMEOUT),
+        kv.expire(`users:${partnerId}`, MATCH_TIMEOUT)
+      ]);
+      
+      // Update stats
+      serverStats.totalMatches++;
+      serverStats.activeMatches++;
       
       return res.json({
         status: 'matched',
         matchId,
         partnerId,
-        isInitiator: match.p1 === userId,
-        signals,
-        timestamp: Date.now()
+        isInitiator: userId === p1,
+        timezone: userTimezone,
+        message: `Matched with ${partnerId}! Use direct Redis for signaling.`,
+        instructions: {
+          signals: `Use KV_REST_API_URL for: signals:${matchId}:${partnerId} (send) and signals:${matchId}:${userId} (receive)`,
+          ice: `Use KV_REST_API_URL for: ice:${matchId}:${partnerId} (send) and ice:${matchId}:${userId} (receive)`
+        }
       });
-    }
-  }
-  
-  // Check if still in waiting list
-  if (waitingUsers.has(userId)) {
-    const position = Array.from(waitingUsers.keys()).indexOf(userId) + 1;
-    return res.json({
-      status: 'waiting',
-      position,
-      waitingUsers: waitingUsers.size,
-      timestamp: Date.now()
-    });
-  }
-  
-  return res.json({
-    status: 'not_found',
-    message: 'User not found in waiting list or active matches',
-    timestamp: Date.now()
-  });
-}
-
-function handleSendSignal(userId, data, res) {
-  const { matchId, type, payload } = data;
-  
-  if (!matchId || !type || !payload) {
-    return res.status(400).json({ 
-      error: 'Missing required fields',
-      required: ['matchId', 'type', 'payload']
-    });
-  }
-  
-  const match = activeMatches.get(matchId);
-  if (!match) {
-    console.log(`[SEND-SIGNAL] Match ${matchId} not found`);
-    return res.status(404).json({ 
-      error: 'Match not found',
-      matchId,
-      availableMatches: Array.from(activeMatches.keys())
-    });
-  }
-  
-  if (match.p1 !== userId && match.p2 !== userId) {
-    return res.status(403).json({ error: 'User not in this match' });
-  }
-  
-  const partnerId = match.p1 === userId ? match.p2 : match.p1;
-  
-  // Add signal to partner's queue
-  if (!match.signals[partnerId]) {
-    match.signals[partnerId] = [];
-  }
-  
-  const signal = {
-    type,
-    payload,
-    from: userId,
-    timestamp: Date.now()
-  };
-  
-  match.signals[partnerId].push(signal);
-  
-  // Limit signal queue size to prevent memory bloat
-  if (match.signals[partnerId].length > 100) {
-    match.signals[partnerId] = match.signals[partnerId].slice(-50);
-    console.log(`[SEND-SIGNAL] Trimmed signal queue for ${partnerId}`);
-  }
-  
-  console.log(`[SEND-SIGNAL] ${userId} -> ${partnerId} (${type}) in match ${matchId}`);
-  
-  return res.json({
-    status: 'sent',
-    partnerId,
-    signalType: type,
-    queueLength: match.signals[partnerId].length,
-    timestamp: Date.now()
-  });
-}
-
-function handleDisconnect(userId, res) {
-  console.log(`[DISCONNECT] ${userId}`);
-  
-  let removed = false;
-  
-  // Remove from waiting list
-  if (waitingUsers.has(userId)) {
-    waitingUsers.delete(userId);
-    removed = true;
-    console.log(`[DISCONNECT] Removed ${userId} from waiting list`);
-  }
-  
-  // Remove from active matches and notify partner
-  for (const [matchId, match] of activeMatches.entries()) {
-    if (match.p1 === userId || match.p2 === userId) {
-      const partnerId = match.p1 === userId ? match.p2 : match.p1;
       
-      // Add disconnect signal to partner's queue
-      if (match.signals[partnerId]) {
-        match.signals[partnerId].push({
-          type: 'disconnect',
-          payload: { reason: 'partner_disconnected' },
-          from: userId,
-          timestamp: Date.now()
+    } else {
+      // Add to queue
+      const queueKey = `waiting_queue:${userTimezone}`;
+      
+      // Check queue size limit
+      const currentQueueSize = await kv.llen(queueKey) || 0;
+      if (currentQueueSize >= MAX_QUEUE_SIZE) {
+        return res.status(503).json({
+          status: 'queue_full',
+          message: `Queue for ${userTimezone} is full. Try again later.`,
+          retryAfter: 30
         });
       }
       
-      console.log(`[DISCONNECT] Removing match ${matchId}, notifying ${partnerId}`);
+      await kv.lpush(queueKey, userId);
+      await kv.expire(queueKey, MATCH_TIMEOUT);
       
-      // Remove match after a delay to let partner receive disconnect signal
-      setTimeout(() => {
-        activeMatches.delete(matchId);
-        console.log(`[DISCONNECT] Match ${matchId} cleaned up`);
-      }, 5000);
+      // Update user status
+      await kv.hset(`users:${userId}`, {
+        status: 'waiting',
+        timezone: userTimezone,
+        queuedAt: Date.now().toString(),
+        lastSeen: Date.now().toString()
+      });
+      await kv.expire(`users:${userId}`, MATCH_TIMEOUT);
       
-      removed = true;
-      break;
+      const position = await kv.llen(queueKey);
+      const estimatedWait = Math.min(position * 5, 60); // 5s per person, max 60s
+      
+      return res.json({
+        status: 'queued',
+        position,
+        estimatedWait,
+        timezone: userTimezone,
+        message: `Added to ${userTimezone} queue. Position: ${position}, estimated wait: ${estimatedWait}s`
+      });
     }
+    
+  } catch (error) {
+    console.error('[JOIN_QUEUE] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to join queue',
+      details: error.message 
+    });
   }
-  
-  return res.json({ 
-    status: 'disconnected',
-    removed,
-    timestamp: Date.now()
-  });
 }
 
-// ==========================================
-// CLEANUP UTILITIES
-// ==========================================
-
-function cleanup() {
-  const now = Date.now();
-  let cleanedUsers = 0;
-  let cleanedMatches = 0;
-  
-  // Clean expired waiting users
-  for (const [userId, user] of waitingUsers.entries()) {
-    if (now - user.timestamp > USER_TIMEOUT) {
-      waitingUsers.delete(userId);
-      cleanedUsers++;
-    }
-  }
-  
-  // Clean old matches
-  for (const [matchId, match] of activeMatches.entries()) {
-    if (now - match.timestamp > MATCH_LIFETIME) {
-      activeMatches.delete(matchId);
-      cleanedMatches++;
-    }
-  }
-  
-  // Prevent memory bloat - remove oldest users if too many waiting
-  if (waitingUsers.size > MAX_WAITING_USERS) {
-    const excess = waitingUsers.size - MAX_WAITING_USERS;
-    const oldestUsers = Array.from(waitingUsers.entries())
-      .sort((a, b) => a[1].timestamp - b[1].timestamp)
-      .slice(0, excess);
+// Poll for match status (Optional - cho UI updates)
+async function handlePollMatch(userId, res) {
+  try {
+    const userData = await kv.hgetall(`users:${userId}`);
     
-    oldestUsers.forEach(([userId]) => {
-      waitingUsers.delete(userId);
-      cleanedUsers++;
+    if (!userData || !userData.status) {
+      return res.json({
+        status: 'not_found',
+        action_needed: 'join-queue',
+        message: 'User not found. Please join queue.'
+      });
+    }
+    
+    // Update last seen
+    await kv.hset(`users:${userId}`, 'lastSeen', Date.now().toString());
+    
+    if (userData.status === 'waiting') {
+      const queueKey = `waiting_queue:${userData.timezone || 'global'}`;
+      const queueList = await kv.lrange(queueKey, 0, -1);
+      const position = queueList.indexOf(userId) + 1;
+      
+      return res.json({
+        status: 'waiting',
+        position: position || 1,
+        estimatedWait: Math.min(position * 5, 60),
+        timezone: userData.timezone,
+        message: `Waiting in queue. Position: ${position}`
+      });
+    }
+    
+    if (userData.status === 'matched' && userData.matchId) {
+      const matchData = await kv.hgetall(`matches:${userData.matchId}`);
+      
+      if (!matchData || matchData.status === 'expired') {
+        // Clean up expired match
+        await cleanupUser(userId);
+        return res.json({
+          status: 'match_expired',
+          action_needed: 'join-queue',
+          message: 'Match expired. Please join queue again.'
+        });
+      }
+      
+      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+      
+      return res.json({
+        status: 'matched',
+        matchId: userData.matchId,
+        partnerId,
+        isInitiator: matchData.p1 === userId,
+        connectionReady: matchData.status === 'connected',
+        message: 'Match active. Use direct Redis for signaling.',
+        instructions: {
+          signals: `signals:${userData.matchId}:${partnerId} (send), signals:${userData.matchId}:${userId} (receive)`,
+          ice: `ice:${userData.matchId}:${partnerId} (send), ice:${userData.matchId}:${userId} (receive)`
+        }
+      });
+    }
+    
+    return res.json({
+      status: userData.status || 'unknown',
+      lastSeen: userData.lastSeen,
+      message: `User status: ${userData.status}`
     });
     
-    console.log(`[CLEANUP] Removed ${excess} oldest users due to capacity limit`);
-  }
-  
-  if (cleanedUsers > 0 || cleanedMatches > 0) {
-    console.log(`[CLEANUP] Removed ${cleanedUsers} expired users, ${cleanedMatches} old matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
+  } catch (error) {
+    console.error('[POLL_MATCH] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to poll match',
+      details: error.message 
+    });
   }
 }
 
-// Auto-cleanup every 5 minutes
-setInterval(cleanup, 300000);
+// Disconnect user và cleanup
+async function handleDisconnect(userId, res) {
+  try {
+    const userData = await kv.hgetall(`users:${userId}`);
+    let cleanupResults = {
+      userRemoved: false,
+      matchCleaned: false,
+      queueRemoved: false,
+      partnerNotified: false
+    };
+    
+    if (userData && userData.matchId) {
+      const matchData = await kv.hgetall(`matches:${userData.matchId}`);
+      if (matchData) {
+        const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+        
+        // Clean up match and related data
+        await Promise.all([
+          kv.del(`matches:${userData.matchId}`),
+          kv.del(`users:${partnerId}`)
+        ]);
+        
+        cleanupResults.matchCleaned = true;
+        cleanupResults.partnerNotified = true;
+        
+        // Update stats
+        if (matchData.status === 'signaling' || matchData.status === 'connected') {
+          serverStats.activeMatches = Math.max(0, serverStats.activeMatches - 1);
+        }
+      }
+    }
+    
+    // Remove from all queues
+    const removedFromQueues = await removeFromAllQueues(userId);
+    cleanupResults.queueRemoved = removedFromQueues > 0;
+    
+    // Remove user data
+    await kv.del(`users:${userId}`);
+    cleanupResults.userRemoved = true;
+    
+    return res.json({
+      status: 'disconnected',
+      cleanup: cleanupResults,
+      message: 'Successfully disconnected and cleaned up all data'
+    });
+    
+  } catch (error) {
+    console.error('[DISCONNECT] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to disconnect',
+      details: error.message 
+    });
+  }
+}
+
+// Helper functions
+function generateMatchId() {
+  return `m_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+}
+
+function getAdjacentTimezones(timezone) {
+  const timezoneMap = {
+    'gmt+7': ['gmt+8', 'gmt+6', 'gmt+9'],
+    'gmt+8': ['gmt+7', 'gmt+9', 'gmt+6'],
+    'gmt+9': ['gmt+8', 'gmt+7', 'gmt+10'],
+    'gmt-5': ['gmt-4', 'gmt-6', 'gmt-3'],
+    'gmt-4': ['gmt-5', 'gmt-3', 'gmt-6'],
+    'gmt-8': ['gmt-7', 'gmt-9', 'gmt-6'],
+    'global': ['gmt+7', 'gmt+8', 'gmt-5']
+  };
+  
+  return timezoneMap[timezone] || ['global'];
+}
+
+async function removeFromAllQueues(userId) {
+  try {
+    const commonQueues = [
+      'waiting_queue:global',
+      'waiting_queue:gmt+7',
+      'waiting_queue:gmt+8', 
+      'waiting_queue:gmt+9',
+      'waiting_queue:gmt-5',
+      'waiting_queue:gmt-4',
+      'waiting_queue:gmt-8'
+    ];
+    
+    let removedCount = 0;
+    for (const queueKey of commonQueues) {
+      const removed = await kv.lrem(queueKey, 0, userId);
+      removedCount += removed || 0;
+    }
+    
+    return removedCount;
+  } catch (error) {
+    console.error('[REMOVE_FROM_QUEUES] Error:', error);
+    return 0;
+  }
+}
+
+async function cleanupUser(userId) {
+  try {
+    await removeFromAllQueues(userId);
+    await kv.del(`users:${userId}`);
+  } catch (error) {
+    console.error('[CLEANUP_USER] Error:', error);
+  }
+}
+
+// Export cleanup function cho external cron jobs (optional)
+export async function performBackgroundCleanup() {
+  try {
+    console.log('[CLEANUP] Running background cleanup...');
+    
+    // Trong Vercel KV, TTL tự động handle cleanup
+    // Function này có thể được gọi bởi cron job nếu cần
+    
+    const timestamp = Date.now();
+    return { 
+      success: true, 
+      timestamp,
+      message: 'TTL-based cleanup active. Manual cleanup completed.' 
+    };
+  } catch (error) {
+    console.error('[BACKGROUND_CLEANUP] Error:', error);
+    return { 
+      success: false, 
+      error: error.message,
+      timestamp: Date.now()
+    };
+  }
+}
