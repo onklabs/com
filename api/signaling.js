@@ -2,7 +2,7 @@
 // 🚀 PERFORMANCE TOGGLE - Controlled by environment variable
 // Set ENABLE_DETAILED_LOGGING=true in Vercel environment variables for detailed logs
 // Set ENABLE_DETAILED_LOGGING=false or leave empty for production speed
-const ENABLE_DETAILED_LOGGING = false';
+const ENABLE_DETAILED_LOGGING = false;
 
 // Configuration constants - Controlled by environment variables with fallback defaults
 const USER_TIMEOUT =  120000; // 2 minutes for waiting users
