@@ -334,15 +334,6 @@ function handleInstantMatch(userId, data) {
         return createCorsResponse({ error: 'userId is required and must be string' }, 400);
     }
     
-    // Optional validation cho chatZone - allow null/undefined
-    if (chatZone !== null && chatZone !== undefined && 
-        (typeof chatZone !== 'number' || chatZone < -12 || chatZone > 12)) {
-        return createCorsResponse({ 
-            error: 'Invalid chatZone - must be number between -12 and 12, or null/undefined',
-            received: { chatZone, type: typeof chatZone }
-        }, 400);
-    }
-    
     smartLog('INSTANT-MATCH', `${userId.slice(-8)} looking for partner (ChatZone: ${chatZone})`);
     
     if (waitingUsers.has(userId)) {
