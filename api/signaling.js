@@ -1,6 +1,6 @@
 // Helper function to safely parse environment variables
 function parseEnvInt(envVar, defaultValue) {
-    const value = Deno.env.get(envVar);
+    const value = process.env.get(envVar);
     if (!value) return defaultValue;
     const parsed = parseInt(value, 10);
     return (!isNaN(parsed) && parsed > 0) ? parsed : defaultValue;
@@ -9,7 +9,7 @@ function parseEnvInt(envVar, defaultValue) {
 // 🚀 PERFORMANCE TOGGLE - Controlled by environment variable
 // Set ENABLE_DETAILED_LOGGING=true in Vercel environment variables for detailed logs
 // Set ENABLE_DETAILED_LOGGING=false or leave empty for production speed
-const ENABLE_DETAILED_LOGGING = Deno.env.get('ENABLE_DETAILED_LOGGING') === 'true';
+const ENABLE_DETAILED_LOGGING = process.env.get('ENABLE_DETAILED_LOGGING') === 'true';
 
 // Configuration constants - Controlled by environment variables with fallback defaults
 const USER_TIMEOUT = parseEnvInt('USER_TIMEOUT', 120000); // 2 minutes for waiting users
