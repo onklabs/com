@@ -1,39 +1,67 @@
-// 🚀 WebRTC Signaling Server with Swap-Based Timezone Matching
-// Edge Runtime Compatible - Optimized for Vercel
+// 🚀 ULTRA-OPTIMIZED WebRTC Signaling Server
+// Edge Runtime Compatible - Maximum Performance
+
+const ENABLE_DETAILED_LOGGING = false;
 
 // ==========================================
 // CONFIGURATION & CONSTANTS
 // ==========================================
 
-const ENABLE_DETAILED_LOGGING = false;
-
-// Configuration constants
 const USER_TIMEOUT = 120000; // 2 minutes for waiting users
 const MATCH_LIFETIME = 600000; // 10 minutes for active matches
 const MAX_WAITING_USERS = 120000; // Prevent memory bloat
 
 // Timezone scoring constants
-const TIMEZONE_MAX_SCORE = 20; // Maximum points for same timezone
-const TIMEZONE_PENALTY = 1; // Points deducted per hour difference
-const TIMEZONE_CIRCLE_HOURS = 24; // 24-hour timezone circle (fixed)
+const TIMEZONE_MAX_SCORE = 20;
+const TIMEZONE_PENALTY = 1;
+const TIMEZONE_CIRCLE_HOURS = 24;
 
-// Swap strategy constants
-const SWAP_COOLDOWN = 2000; // 2 seconds between swaps
-const MAX_SWAP_ATTEMPTS = 3; // Max swaps per failed match
+// Performance constants
+const INDEX_REBUILD_INTERVAL = 10000; // 10 seconds
+const MAX_CACHE_SIZE = 1000;
+const MATCH_CACHE_TTL = 5000; // 5 seconds
+const MAX_CANDIDATES = 5; // Reduced from 10
 
 // ==========================================
-// GLOBAL STATE
+// OPTIMIZED GLOBAL STATE
 // ==========================================
 
-let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo, chatZone }
-let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
-let sortedUsersByTimezone = []; // Array sorted by chatZone for efficient matching
-let lastSwapTime = 0; // Global swap cooldown
+let waitingUsers = new Map();
+let activeMatches = new Map();
+
+// 🔥 OPTIMIZATION 1: Multiple indexed data structures
+let timezoneIndex = new Map(); // timezone -> Set(userIds)
+let genderIndex = new Map();   // gender -> Set(userIds)
+let freshUsersSet = new Set(); // Users < 30s
+let lastIndexRebuild = 0;
+let indexDirty = false;
+
+// 🔥 OPTIMIZATION 2: Pre-calculated distance cache
+let distanceCache = new Map(); // "zone1,zone2" -> circularDistance
+let timezoneScoreTable = new Array(25); // Pre-calculated scores 0-24
+let genderScoreTable = new Map(); // Pre-calculated gender combinations
+
+// 🔥 OPTIMIZATION 3: Object pools for memory optimization
+let matchObjectPool = [];
+let signalObjectPool = [];
+
+// ==========================================
+// PERFORMANCE MONITORING
+// ==========================================
+
 let requestCount = 0;
 let lastResetTime = Date.now();
 
+function trackRequest() {
+    requestCount++;
+    if (Date.now() - lastResetTime > 3600000) {
+        requestCount = 0;
+        lastResetTime = Date.now();
+    }
+}
+
 // ==========================================
-// LOGGING UTILITIES
+// LOGGING UTILITIES (OPTIMIZED)
 // ==========================================
 
 function smartLog(level, ...args) {
@@ -44,20 +72,6 @@ function smartLog(level, ...args) {
 
 function criticalLog(level, ...args) {
     console.log(`[${level}]`, ...args);
-}
-
-function logWithContext(level, action, userId, context = {}) {
-    const timestamp = new Date().toISOString();
-    const shortId = userId ? userId.slice(-8) : 'N/A';
-    const contextStr = Object.keys(context).length > 0 ? JSON.stringify(context) : '';
-    
-    if (level === 'CRITICAL' || !ENABLE_DETAILED_LOGGING) {
-        if (level === 'CRITICAL') {
-            console.log(`[${timestamp}] [${level}] ${action} - ${shortId} ${contextStr}`);
-        }
-    } else {
-        console.log(`[${timestamp}] [${level}] ${action} - ${shortId} ${contextStr}`);
-    }
 }
 
 // ==========================================
@@ -77,460 +91,305 @@ function createCorsResponse(data, status = 200) {
 }
 
 // ==========================================
-// SORTED LIST MAINTENANCE
+// INITIALIZATION - PRE-CALCULATE TABLES
 // ==========================================
 
-function maintainSortedList() {
-    const usersWithValidTimezone = Array.from(waitingUsers.values())
-        .filter(user => typeof user.chatZone === 'number' && 
-                       user.chatZone >= -12 && user.chatZone <= 12);
+function initializeOptimizations() {
+    // Pre-calculate timezone score table
+    for (let distance = 0; distance <= 24; distance++) {
+        timezoneScoreTable[distance] = Math.max(0, TIMEZONE_MAX_SCORE - (distance * TIMEZONE_PENALTY));
+    }
     
-    usersWithValidTimezone.sort((a, b) => {
-        if (a.chatZone !== b.chatZone) {
-            return a.chatZone - b.chatZone;
+    // Pre-calculate gender score combinations
+    const genders = ['Male', 'Female', 'Unspecified'];
+    const genderCoeffs = { 'Male': 1, 'Female': -1, 'Unspecified': 0 };
+    
+    for (const g1 of genders) {
+        for (const g2 of genders) {
+            const coeff1 = genderCoeffs[g1];
+            const coeff2 = genderCoeffs[g2];
+            const score = 3 - (coeff1 * coeff2);
+            genderScoreTable.set(`${g1},${g2}`, score);
         }
-        return a.timestamp - b.timestamp;
-    });
-    
-    sortedUsersByTimezone = usersWithValidTimezone;
-    
-    smartLog('SORTED-LIST', `Rebuilt: ${sortedUsersByTimezone.length} users with valid timezones`);
-}
-
-// ==========================================
-// TIMEZONE CALCULATION UTILITIES
-// ==========================================
-
-function calculateCircularTimezoneDistance(userChatZone, partnerChatZone) {
-    if (typeof userChatZone !== 'number' || typeof partnerChatZone !== 'number') {
-        return {
-            linear: null,
-            circular: null,
-            isValid: false
-        };
     }
     
-    const linearDistance = Math.abs(userChatZone - partnerChatZone);
-    const circularDistance = linearDistance > 12 ? TIMEZONE_CIRCLE_HOURS - linearDistance : linearDistance;
-    
-    return {
-        linear: linearDistance,
-        circular: circularDistance,
-        isValid: true
-    };
+    criticalLog('INIT', 'Optimization tables initialized');
 }
 
-function calculateTimezoneScore(userChatZone, partnerChatZone) {
-    const distances = calculateCircularTimezoneDistance(userChatZone, partnerChatZone);
+// Initialize on startup
+initializeOptimizations();
+
+// ==========================================
+// ULTRA-FAST DISTANCE CALCULATION WITH CACHE
+// ==========================================
+
+function getCircularDistance(zone1, zone2) {
+    if (typeof zone1 !== 'number' || typeof zone2 !== 'number') return 12;
     
-    if (!distances.isValid) {
-        return Math.floor(TIMEZONE_MAX_SCORE / 2); // 10 points for invalid timezone
+    // Cache key (normalized)
+    const cacheKey = zone1 <= zone2 ? `${zone1},${zone2}` : `${zone2},${zone1}`;
+    
+    if (distanceCache.has(cacheKey)) {
+        return distanceCache.get(cacheKey);
     }
     
-    const score = Math.max(0, TIMEZONE_MAX_SCORE - (distances.circular * TIMEZONE_PENALTY));
+    const linear = Math.abs(zone1 - zone2);
+    const circular = linear > 12 ? 24 - linear : linear;
     
-    smartLog('TIMEZONE-SCORE', `Zones ${userChatZone} <-> ${partnerChatZone}: linear=${distances.linear}h, circular=${distances.circular}h, score=${score}`);
-    
-    return score;
-}
-
-// ==========================================
-// GENDER SCORING UTILITIES
-// ==========================================
-
-function getGenderCoefficient(gender) {
-    switch (gender) {
-        case 'Male': return 1;
-        case 'Female': return -1;
-        case 'Unspecified':
-        default: return 0;
+    // Add to cache with LRU eviction
+    if (distanceCache.size >= MAX_CACHE_SIZE) {
+        const firstKey = distanceCache.keys().next().value;
+        distanceCache.delete(firstKey);
     }
+    distanceCache.set(cacheKey, circular);
+    
+    return circular;
 }
 
-function calculateGenderScore(userGender, partnerGender) {
-    const userCoeff = getGenderCoefficient(userGender);
-    const partnerCoeff = getGenderCoefficient(partnerGender);
-    
-    const genderScore = 3 - (userCoeff * partnerCoeff);
-    
-    smartLog('GENDER-SCORE', `${userGender}(${userCoeff}) × ${partnerGender}(${partnerCoeff}) = ${userCoeff * partnerCoeff}, score = 3 - (${userCoeff * partnerCoeff}) = ${genderScore} points`);
-    
-    return genderScore;
+function getTimezoneScore(zone1, zone2) {
+    const distance = getCircularDistance(zone1, zone2);
+    return timezoneScoreTable[distance] || 0;
+}
+
+function getGenderScore(gender1, gender2) {
+    const key = `${gender1 || 'Unspecified'},${gender2 || 'Unspecified'}`;
+    return genderScoreTable.get(key) || 3;
 }
 
 // ==========================================
-// SWAP INFORMATION STRATEGY
+// LIGHTNING-FAST INDEXED MATCHING
 // ==========================================
 
-function swapUserInformation(failedUserId, userChatZone) {
+function buildIndexes() {
     const now = Date.now();
+    if (!indexDirty && now - lastIndexRebuild < INDEX_REBUILD_INTERVAL) return;
     
-    if (now - lastSwapTime < SWAP_COOLDOWN) {
-        smartLog('SWAP', `Swap cooldown active, skipping swap for ${failedUserId.slice(-8)}`);
-        return false;
-    }
+    // Clear indexes
+    timezoneIndex.clear();
+    genderIndex.clear();
+    freshUsersSet.clear();
     
-    if (!failedUserId || typeof userChatZone !== 'number') {
-        smartLog('SWAP', `Invalid inputs: failedUserId=${failedUserId}, userChatZone=${userChatZone}`);
-        return false;
-    }
-    
-    const failedUser = waitingUsers.get(failedUserId);
-    if (!failedUser || failedUser.chatZone !== userChatZone) {
-        smartLog('SWAP', `Failed user ${failedUserId.slice(-8)} not found or zone mismatch`);
-        return false;
-    }
-    
-    const sameZoneUsers = Array.from(waitingUsers.values()).filter(user => 
-        user.chatZone === userChatZone && 
-        user.userId !== failedUserId &&
-        user.userInfo
-    );
-    
-    if (sameZoneUsers.length === 0) {
-        smartLog('SWAP', `No valid users in zone ${userChatZone} to swap with ${failedUserId.slice(-8)}`);
-        return false;
-    }
-    
-    const randomIndex = Math.floor(Math.random() * sameZoneUsers.length);
-    const swapTargetUser = sameZoneUsers[randomIndex];
-    const swapTargetUserId = swapTargetUser.userId;
-    
-    // Deep clone to avoid reference issues
-    const failedUserInfo = failedUser.userInfo ? JSON.parse(JSON.stringify(failedUser.userInfo)) : {};
-    const swapTargetUserInfo = swapTargetUser.userInfo ? JSON.parse(JSON.stringify(swapTargetUser.userInfo)) : {};
-    const failedUserTimestamp = failedUser.timestamp;
-    const swapTargetTimestamp = swapTargetUser.timestamp;
-    
-    // Perform the swap
-    failedUser.userInfo = swapTargetUserInfo;
-    failedUser.timestamp = swapTargetTimestamp;
-    
-    swapTargetUser.userInfo = failedUserInfo;
-    swapTargetUser.timestamp = failedUserTimestamp;
-    
-    // Ensure Map is updated
-    waitingUsers.set(failedUserId, failedUser);
-    waitingUsers.set(swapTargetUserId, swapTargetUser);
-    
-    maintainSortedList();
-    
-    lastSwapTime = now;
-    
-    criticalLog('SWAP-INFO', `🔄 Swapped information: ${failedUserId.slice(-8)} ↔ ${swapTargetUserId.slice(-8)} in zone ${userChatZone}`);
-    
-    if (ENABLE_DETAILED_LOGGING) {
-        smartLog('SWAP-DETAILS', {
-            failed: { 
-                id: failedUserId.slice(-8), 
-                newInfo: failedUser.userInfo,
-                newTimestamp: failedUser.timestamp
-            },
-            target: { 
-                id: swapTargetUserId.slice(-8), 
-                newInfo: swapTargetUser.userInfo,
-                newTimestamp: swapTargetUser.timestamp
+    // Build new indexes in single pass
+    for (const [userId, user] of waitingUsers.entries()) {
+        // Timezone index
+        const zone = user.chatZone;
+        if (typeof zone === 'number') {
+            if (!timezoneIndex.has(zone)) {
+                timezoneIndex.set(zone, new Set());
             }
-        });
-    }
-    
-    return true;
-}
-
-// ==========================================
-// OPTIMIZED PARTNER FINDING
-// ==========================================
-
-function findClosestPartners(userChatZone, userId) {
-    if (typeof userChatZone !== 'number' || sortedUsersByTimezone.length === 0) {
-        return [];
-    }
-    
-    const candidates = [];
-    const userZone = userChatZone;
-    
-    let insertIndex = 0;
-    for (let i = 0; i < sortedUsersByTimezone.length; i++) {
-        if (sortedUsersByTimezone[i].chatZone >= userZone) {
-            insertIndex = i;
-            break;
-        }
-        insertIndex = i + 1;
-    }
-    
-    // Priority 1: Same timezone users first
-    for (let i = 0; i < sortedUsersByTimezone.length; i++) {
-        const user = sortedUsersByTimezone[i];
-        if (user.chatZone === userZone && user.userId !== userId) {
-            candidates.push({
-                user: user,
-                circularDistance: 0,
-                linearDistance: 0,
-                priority: 'same-zone',
-                index: i
-            });
-        }
-    }
-    
-    // Priority 2: Adjacent timezones
-    const searchRadius = Math.min(6, sortedUsersByTimezone.length);
-    
-    for (let radius = 1; radius <= searchRadius; radius++) {
-        if (insertIndex - radius >= 0) {
-            const leftUser = sortedUsersByTimezone[insertIndex - radius];
-            if (leftUser.userId !== userId && leftUser.chatZone !== userZone) {
-                const distance = calculateCircularTimezoneDistance(userZone, leftUser.chatZone);
-                if (distance.isValid) {
-                    candidates.push({
-                        user: leftUser,
-                        circularDistance: distance.circular,
-                        linearDistance: distance.linear,
-                        priority: 'adjacent',
-                        index: insertIndex - radius
-                    });
-                }
-            }
+            timezoneIndex.get(zone).add(userId);
         }
         
-        if (insertIndex + radius < sortedUsersByTimezone.length) {
-            const rightUser = sortedUsersByTimezone[insertIndex + radius];
-            if (rightUser.userId !== userId && rightUser.chatZone !== userZone) {
-                const distance = calculateCircularTimezoneDistance(userZone, rightUser.chatZone);
-                if (distance.isValid) {
-                    candidates.push({
-                        user: rightUser,
-                        circularDistance: distance.circular,
-                        linearDistance: distance.linear,
-                        priority: 'adjacent',
-                        index: insertIndex + radius
-                    });
+        // Gender index
+        const gender = user.userInfo?.gender || 'Unspecified';
+        if (!genderIndex.has(gender)) {
+            genderIndex.set(gender, new Set());
+        }
+        genderIndex.get(gender).add(userId);
+        
+        // Fresh users (< 30 seconds)
+        if (now - user.timestamp < 30000) {
+            freshUsersSet.add(userId);
+        }
+    }
+    
+    lastIndexRebuild = now;
+    indexDirty = false;
+    
+    smartLog('INDEX-REBUILD', `Indexes built: ${timezoneIndex.size} zones, ${genderIndex.size} genders, ${freshUsersSet.size} fresh`);
+}
+
+function findUltraFastMatch(userId, userChatZone, userGender) {
+    buildIndexes();
+    
+    const now = Date.now();
+    let bestMatch = null;
+    let bestScore = 0;
+    
+    // 🔥 PRIORITY 1: Same timezone + fresh users (< 30s)
+    if (typeof userChatZone === 'number') {
+        const sameZoneCandidates = timezoneIndex.get(userChatZone);
+        if (sameZoneCandidates) {
+            for (const candidateId of sameZoneCandidates) {
+                if (candidateId === userId) continue;
+                
+                const candidate = waitingUsers.get(candidateId);
+                if (!candidate) continue;
+                
+                let score = 21; // Base score for same timezone (20 + 1)
+                
+                // Gender bonus
+                const candidateGender = candidate.userInfo?.gender || 'Unspecified';
+                score += getGenderScore(userGender, candidateGender);
+                
+                // Fresh user mega bonus
+                if (freshUsersSet.has(candidateId)) {
+                    score += 3;
+                }
+                
+                // 🚀 EARLY EXIT: Perfect fresh match
+                if (score >= 27) {
+                    return { userId: candidateId, user: candidate, score };
+                }
+                
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = { userId: candidateId, user: candidate, score };
                 }
             }
         }
     }
     
-    candidates.sort((a, b) => {
-        if (a.priority === 'same-zone' && b.priority !== 'same-zone') return -1;
-        if (b.priority === 'same-zone' && a.priority !== 'same-zone') return 1;
+    // 🔥 PRIORITY 2: Adjacent timezones (±1, ±2) - but only if no good same-zone match
+    if (bestScore < 23 && typeof userChatZone === 'number') {
+        const adjacentZones = [
+            userChatZone - 1, userChatZone + 1,  // ±1 hour
+            userChatZone - 2, userChatZone + 2   // ±2 hours
+        ];
         
-        if (a.circularDistance !== b.circularDistance) {
-            return a.circularDistance - b.circularDistance;
+        for (const adjZone of adjacentZones) {
+            const normalizedZone = ((adjZone + 12) % 24) - 12; // Handle wraparound
+            const adjCandidates = timezoneIndex.get(normalizedZone);
+            
+            if (!adjCandidates) continue;
+            
+            // Only check first 2 candidates from adjacent zones for speed
+            let checkedCount = 0;
+            for (const candidateId of adjCandidates) {
+                if (candidateId === userId || checkedCount >= 2) continue;
+                checkedCount++;
+                
+                const candidate = waitingUsers.get(candidateId);
+                if (!candidate) continue;
+                
+                let score = 1 + getTimezoneScore(userChatZone, normalizedZone);
+                
+                // Gender bonus
+                const candidateGender = candidate.userInfo?.gender || 'Unspecified';
+                score += getGenderScore(userGender, candidateGender);
+                
+                // Fresh bonus
+                if (freshUsersSet.has(candidateId)) {
+                    score += 2;
+                }
+                
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = { userId: candidateId, user: candidate, score };
+                }
+            }
         }
-        return a.linearDistance - b.linearDistance;
-    });
+    }
     
-    return candidates;
+    // 🔥 PRIORITY 3: Any timezone - only if no decent match found
+    if (bestScore < 15) {
+        let checkedCount = 0;
+        for (const [candidateId, candidate] of waitingUsers.entries()) {
+            if (candidateId === userId || checkedCount >= 5) break;
+            checkedCount++;
+            
+            let score = 1 + getTimezoneScore(userChatZone, candidate.chatZone);
+            
+            const candidateGender = candidate.userInfo?.gender || 'Unspecified';
+            score += getGenderScore(userGender, candidateGender);
+            
+            if (freshUsersSet.has(candidateId)) {
+                score += 1;
+            }
+            
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = { userId: candidateId, user: candidate, score };
+            }
+        }
+    }
+    
+    return bestMatch;
 }
 
 // ==========================================
-// ENHANCED INSTANT MATCH HANDLER
+// OPTIMIZED INSTANT MATCH HANDLER
 // ==========================================
 
 function handleInstantMatch(userId, data) {
     const { userInfo, preferredMatchId, chatZone, gender } = data;
     
-    // RELAXED VALIDATION - chỉ check userId required
+    // MINIMAL VALIDATION - NO chatZone validation to avoid 400 error
     if (!userId || typeof userId !== 'string') {
         return createCorsResponse({ error: 'userId is required and must be string' }, 400);
     }
     
     smartLog('INSTANT-MATCH', `${userId.slice(-8)} looking for partner (ChatZone: ${chatZone})`);
     
+    // Remove from existing states
     if (waitingUsers.has(userId)) {
         waitingUsers.delete(userId);
-        smartLog('INSTANT-MATCH', `Updated existing user ${userId.slice(-8)}`);
+        indexDirty = true;
     }
     
+    // Remove from active matches
     for (const [matchId, match] of activeMatches.entries()) {
         if (match.p1 === userId || match.p2 === userId) {
-            smartLog('INSTANT-MATCH', `Removing ${userId.slice(-8)} from existing match ${matchId}`);
             activeMatches.delete(matchId);
             break;
         }
     }
     
-    maintainSortedList();
-    
-    let bestMatch = null;
-    let bestMatchScore = 0;
-    let bestMatchDetails = null;
-    let failedPartnerId = null;
-    
-    if (typeof chatZone === 'number' && chatZone >= -12 && chatZone <= 12) {
-        const closestCandidates = findClosestPartners(chatZone, userId);
-        
-        smartLog('OPTIMIZED-SEARCH', `Found ${closestCandidates.length} candidates for user ${userId.slice(-8)} (zone: ${chatZone})`);
-        
-        const maxCandidates = Math.min(10, closestCandidates.length);
-        
-        for (let i = 0; i < maxCandidates; i++) {
-            const candidate = closestCandidates[i];
-            const waitingUser = candidate.user;
-            const waitingUserId = waitingUser.userId;
-            
-            let score = 1;
-            let scoreBreakdown = ENABLE_DETAILED_LOGGING ? { base: 1 } : null;
-            
-            const timezoneScore = Math.max(0, TIMEZONE_MAX_SCORE - (candidate.circularDistance * TIMEZONE_PENALTY));
-            score += timezoneScore;
-            if (scoreBreakdown) scoreBreakdown.timezone = timezoneScore;
-            
-            if (candidate.circularDistance === 0) {
-                score += 5;
-                if (scoreBreakdown) scoreBreakdown.sameTimezone = 5;
-            } else if (candidate.circularDistance <= 1) {
-                score += 3;
-                if (scoreBreakdown) scoreBreakdown.veryClose = 3;
-            } else if (candidate.circularDistance <= 3) {
-                score += 1;
-                if (scoreBreakdown) scoreBreakdown.close = 1;
-            }
-            
-            if (userInfo && waitingUser.userInfo) {
-                const userGender = gender || userInfo.gender || 'Unspecified';
-                const partnerGender = waitingUser.userInfo.gender || 'Unspecified';
-                const genderScore = calculateGenderScore(userGender, partnerGender);
-                score += genderScore;
-                if (scoreBreakdown) scoreBreakdown.gender = genderScore;
-            }
-            
-            const waitTime = Date.now() - waitingUser.timestamp;
-            if (waitTime < 30000) {
-                score += 1;
-                if (scoreBreakdown) scoreBreakdown.freshness = 1;
-            }
-            
-            if (ENABLE_DETAILED_LOGGING) {
-                smartLog('CANDIDATE-EVAL', `${waitingUserId.slice(-8)} | Distance: ${candidate.circularDistance}h | Score: ${score} | Breakdown:`, scoreBreakdown);
-            }
-            
-            if (score > bestMatchScore) {
-                bestMatchScore = score;
-                bestMatch = { userId: waitingUserId, user: waitingUser };
-                bestMatchDetails = {
-                    totalScore: score,
-                    linearDistance: candidate.linearDistance,
-                    circularDistance: candidate.circularDistance,
-                    scoreBreakdown: scoreBreakdown,
-                    searchMethod: 'optimized-timezone',
-                    candidateIndex: i
-                };
-            }
-            
-            if (candidate.circularDistance === 0 && score >= 25) {
-                smartLog('EARLY-EXIT', `Perfect match found at candidate ${i}, stopping search`);
-                break;
-            }
-        }
-        
-        if (closestCandidates.length > 0) {
-            failedPartnerId = closestCandidates[0].user.userId;
-        }
-    }
-    
-    if (!bestMatch && waitingUsers.size > 0) {
-        smartLog('FALLBACK-SEARCH', `No optimized match found, using traditional search for ${userId.slice(-8)}`);
-        
-        for (const [waitingUserId, waitingUser] of waitingUsers.entries()) {
-            if (waitingUserId === userId) continue;
-            
-            let score = 1;
-            const timezoneScore = calculateTimezoneScore(chatZone, waitingUser.chatZone);
-            score += timezoneScore;
-            
-            if (userInfo && waitingUser.userInfo) {
-                const genderScore = calculateGenderScore(
-                    gender || userInfo.gender || 'Unspecified',
-                    waitingUser.userInfo.gender || 'Unspecified'
-                );
-                score += genderScore;
-            }
-            
-            if (score > bestMatchScore) {
-                bestMatchScore = score;
-                bestMatch = { userId: waitingUserId, user: waitingUser };
-                bestMatchDetails = {
-                    totalScore: score,
-                    searchMethod: 'fallback-traditional'
-                };
-            }
-        }
-    }
+    // 🚀 ULTRA-FAST MATCH FINDING
+    const userGender = gender || userInfo?.gender || 'Unspecified';
+    const bestMatch = findUltraFastMatch(userId, chatZone, userGender);
     
     if (bestMatch) {
         const partnerId = bestMatch.userId;
         const partnerUser = bestMatch.user;
         
+        // Remove partner from waiting
         waitingUsers.delete(partnerId);
-        maintainSortedList();
+        indexDirty = true;
         
+        // Create match with object pooling
         const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         
         const isUserInitiator = userId < partnerId;
         const p1 = isUserInitiator ? userId : partnerId;
         const p2 = isUserInitiator ? partnerId : userId;
         
-        const match = {
-            p1, p2,
-            timestamp: Date.now(),
-            signals: { [p1]: [], [p2]: [] },
-            userInfo: {
-                [userId]: userInfo || {},
-                [partnerId]: partnerUser.userInfo || {}
-            },
-            chatZones: {
-                [userId]: chatZone,
-                [partnerId]: partnerUser.chatZone
-            },
-            matchScore: bestMatchScore,
-            matchDetails: bestMatchDetails
+        // Reuse or create match object
+        const match = matchObjectPool.pop() || {};
+        match.p1 = p1;
+        match.p2 = p2;
+        match.timestamp = Date.now();
+        match.signals = { [p1]: [], [p2]: [] };
+        match.userInfo = {
+            [userId]: userInfo || {},
+            [partnerId]: partnerUser.userInfo || {}
         };
+        match.chatZones = {
+            [userId]: chatZone,
+            [partnerId]: partnerUser.chatZone
+        };
+        match.matchScore = bestMatch.score;
         
         activeMatches.set(matchId, match);
         
-        const distanceInfo = bestMatchDetails.circularDistance !== undefined 
-            ? ` | Distance: ${bestMatchDetails.circularDistance}h` 
-            : '';
-        const methodInfo = bestMatchDetails.searchMethod ? ` | Method: ${bestMatchDetails.searchMethod}` : '';
+        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatch.score}`);
         
-        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatchScore}${distanceInfo}${methodInfo}`);
-        
+        // Quick response - minimal object creation
         return createCorsResponse({
             status: 'instant-match',
-            matchId, partnerId,
+            matchId,
+            partnerId,
             isInitiator: isUserInitiator,
             partnerInfo: partnerUser.userInfo || {},
             partnerChatZone: partnerUser.chatZone,
             signals: [],
-            compatibility: bestMatchScore,
-            timezoneDistance: bestMatchDetails.circularDistance,
-            matchQuality: {
-                totalScore: bestMatchScore,
-                linearDistance: bestMatchDetails.linearDistance,
-                circularDistance: bestMatchDetails.circularDistance,
-                searchMethod: bestMatchDetails.searchMethod,
-                breakdown: bestMatchDetails.scoreBreakdown
-            },
+            compatibility: bestMatch.score,
             message: 'Instant match found! WebRTC connection will be established.',
             timestamp: Date.now()
         });
         
     } else {
-        if (failedPartnerId && typeof chatZone === 'number') {
-            const closestCandidate = waitingUsers.get(failedPartnerId);
-            if (closestCandidate && closestCandidate.chatZone === chatZone) {
-                const swapSuccess = swapUserInformation(failedPartnerId, chatZone);
-                if (swapSuccess) {
-                    smartLog('SWAP-STRATEGY', `Applied swap strategy for future matching of ${userId.slice(-8)}`);
-                }
-            } else if (closestCandidate) {
-                const swapSuccess = swapUserInformation(failedPartnerId, closestCandidate.chatZone);
-                if (swapSuccess) {
-                    smartLog('SWAP-STRATEGY', `Applied cross-zone swap strategy for ${userId.slice(-8)}`);
-                }
-            }
-        }
-        
+        // Add to waiting list
         const waitingUser = {
             userId,
             userInfo: userInfo || {},
@@ -539,18 +398,17 @@ function handleInstantMatch(userId, data) {
         };
         
         waitingUsers.set(userId, waitingUser);
-        maintainSortedList();
+        indexDirty = true;
         
         const position = waitingUsers.size;
-        smartLog('INSTANT-MATCH', `${userId.slice(-8)} added to waiting list (position ${position}, chatZone: ${chatZone})`);
+        smartLog('INSTANT-MATCH', `${userId.slice(-8)} added to waiting list (position ${position})`);
         
         return createCorsResponse({
             status: 'waiting',
             position,
             waitingUsers: waitingUsers.size,
             chatZone: chatZone,
-            userGender: userInfo?.gender || 'Unspecified',
-            swapApplied: failedPartnerId ? true : false,
+            userGender: userGender,
             message: 'Added to matching queue. Waiting for partner...',
             estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
             timestamp: Date.now()
@@ -559,7 +417,7 @@ function handleInstantMatch(userId, data) {
 }
 
 // ==========================================
-// OTHER HANDLERS
+// OTHER HANDLERS (OPTIMIZED)
 // ==========================================
 
 function handleGetSignals(userId, data) {
@@ -572,7 +430,7 @@ function handleGetSignals(userId, data) {
             
             match.signals[userId] = [];
             
-            smartLog('GET-SIGNALS', `${userId.slice(-8)} -> ${signals.length} signals from match ${matchId}`);
+            smartLog('GET-SIGNALS', `${userId.slice(-8)} -> ${signals.length} signals`);
             
             return createCorsResponse({
                 status: 'matched',
@@ -634,20 +492,23 @@ function handleSendSignal(userId, data) {
         match.signals[partnerId] = [];
     }
     
-    const signal = {
-        type,
-        payload,
-        from: userId,
-        timestamp: Date.now()
-    };
+    // Reuse signal object from pool
+    const signal = signalObjectPool.pop() || {};
+    signal.type = type;
+    signal.payload = payload;
+    signal.from = userId;
+    signal.timestamp = Date.now();
     
     match.signals[partnerId].push(signal);
     
+    // Limit queue size
     if (match.signals[partnerId].length > 100) {
-        match.signals[partnerId] = match.signals[partnerId].slice(-50);
+        const removed = match.signals[partnerId].splice(0, 50);
+        // Return removed signals to pool
+        signalObjectPool.push(...removed);
     }
     
-    smartLog('SEND-SIGNAL', `${userId.slice(-8)} -> ${partnerId.slice(-8)} (${type}) in match ${matchId}`);
+    smartLog('SEND-SIGNAL', `${userId.slice(-8)} -> ${partnerId.slice(-8)} (${type})`);
     
     return createCorsResponse({
         status: 'sent',
@@ -667,18 +528,21 @@ function handleP2pConnected(userId, data) {
     if (waitingUsers.has(userId)) {
         waitingUsers.delete(userId);
         removed = true;
-        criticalLog('P2P-CONNECTED', `Removed ${userId.slice(-8)} from waiting list`);
+        indexDirty = true;
     }
     if (waitingUsers.has(partnerId)) {
         waitingUsers.delete(partnerId);
         removed = true;
-        criticalLog('P2P-CONNECTED', `Removed ${partnerId.slice(-8)} from waiting list`);
+        indexDirty = true;
     }
     
-    activeMatches.delete(matchId);
-    
-    if (removed) {
-        maintainSortedList();
+    // Return match object to pool
+    const match = activeMatches.get(matchId);
+    if (match) {
+        // Clear and return to pool
+        Object.keys(match).forEach(key => delete match[key]);
+        matchObjectPool.push(match);
+        activeMatches.delete(matchId);
     }
     
     return createCorsResponse({
@@ -696,7 +560,7 @@ function handleDisconnect(userId) {
     if (waitingUsers.has(userId)) {
         waitingUsers.delete(userId);
         removed = true;
-        smartLog('DISCONNECT', `Removed ${userId.slice(-8)} from waiting list`);
+        indexDirty = true;
     }
     
     for (const [matchId, match] of activeMatches.entries()) {
@@ -704,23 +568,25 @@ function handleDisconnect(userId) {
             const partnerId = match.p1 === userId ? match.p2 : match.p1;
             
             if (match.signals && match.signals[partnerId]) {
-                match.signals[partnerId].push({
-                    type: 'disconnect',
-                    payload: { reason: 'partner_disconnected' },
-                    from: userId,
-                    timestamp: Date.now()
-                });
+                const disconnectSignal = signalObjectPool.pop() || {};
+                disconnectSignal.type = 'disconnect';
+                disconnectSignal.payload = { reason: 'partner_disconnected' };
+                disconnectSignal.from = userId;
+                disconnectSignal.timestamp = Date.now();
+                
+                match.signals[partnerId].push(disconnectSignal);
             }
             
-            criticalLog('DISCONNECT', `Removing match ${matchId}, notifying ${partnerId.slice(-8)}`);
+            criticalLog('DISCONNECT', `Removing match ${matchId}`);
+            
+            // Return match to pool
+            Object.keys(match).forEach(key => delete match[key]);
+            matchObjectPool.push(match);
             activeMatches.delete(matchId);
+            
             removed = true;
             break;
         }
-    }
-    
-    if (removed) {
-        maintainSortedList();
     }
     
     return createCorsResponse({ 
@@ -731,7 +597,7 @@ function handleDisconnect(userId) {
 }
 
 // ==========================================
-// CLEANUP FUNCTION
+// OPTIMIZED CLEANUP
 // ==========================================
 
 function cleanup() {
@@ -739,17 +605,13 @@ function cleanup() {
     let cleanedUsers = 0;
     let cleanedMatches = 0;
     
+    // Batch cleanup - collect expired IDs first
     const expiredUsers = [];
     for (const [userId, user] of waitingUsers.entries()) {
         if (now - user.timestamp > USER_TIMEOUT) {
             expiredUsers.push(userId);
         }
     }
-    
-    expiredUsers.forEach(userId => {
-        waitingUsers.delete(userId);
-        cleanedUsers++;
-    });
     
     const expiredMatches = [];
     for (const [matchId, match] of activeMatches.entries()) {
@@ -758,11 +620,24 @@ function cleanup() {
         }
     }
     
+    // Batch delete
+    expiredUsers.forEach(userId => {
+        waitingUsers.delete(userId);
+        cleanedUsers++;
+    });
+    
     expiredMatches.forEach(matchId => {
+        const match = activeMatches.get(matchId);
+        if (match) {
+            // Return to pool
+            Object.keys(match).forEach(key => delete match[key]);
+            matchObjectPool.push(match);
+        }
         activeMatches.delete(matchId);
         cleanedMatches++;
     });
     
+    // Capacity limit cleanup
     if (waitingUsers.size > MAX_WAITING_USERS) {
         const excess = waitingUsers.size - MAX_WAITING_USERS;
         const oldestUsers = Array.from(waitingUsers.entries())
@@ -774,23 +649,23 @@ function cleanup() {
             waitingUsers.delete(userId);
             cleanedUsers++;
         });
-        
-        criticalLog('CLEANUP', `Removed ${excess} oldest users due to capacity limit`);
     }
     
-    // Reset swap state if no users waiting
-    if (waitingUsers.size === 0) {
-        lastSwapTime = 0;
-        smartLog('CLEANUP', 'Reset swap state - no waiting users');
-    }
-    
-    // Rebuild sorted list if any users were removed
+    // Mark indexes as dirty if cleanup occurred
     if (cleanedUsers > 0) {
-        maintainSortedList();
+        indexDirty = true;
+    }
+    
+    // Trim object pools
+    if (matchObjectPool.length > 100) {
+        matchObjectPool.length = 50;
+    }
+    if (signalObjectPool.length > 200) {
+        signalObjectPool.length = 100;
     }
     
     if (cleanedUsers > 0 || cleanedMatches > 0) {
-        criticalLog('CLEANUP', `Removed ${cleanedUsers} expired users, ${cleanedMatches} old matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
+        criticalLog('CLEANUP', `Removed ${cleanedUsers} users, ${cleanedMatches} matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
     }
 }
 
@@ -798,117 +673,63 @@ function cleanup() {
 // MAIN HANDLER FUNCTION
 // ==========================================
 
-export default async function handler(req) {   
-    // Trigger cleanup on every request
+export default async function handler(req) {
+    trackRequest();
     cleanup();
     
-    // Handle CORS preflight
     if (req.method === 'OPTIONS') {
         return createCorsResponse(null, 200);
     }
     
-    // GET: Health check and debug info
     if (req.method === 'GET') {
         const url = new URL(req.url);
         const debug = url.searchParams.get('debug');
         
         if (debug === 'true') {
-            // Calculate timezone distribution for debugging
-            const timezoneDistribution = {};
-            for (const user of waitingUsers.values()) {
-                const zone = user.chatZone || 'unknown';
-                timezoneDistribution[zone] = (timezoneDistribution[zone] || 0) + 1;
-            }
-            
-            // Simple distance matrix for debugging (limited to prevent slowdown)
-            const waitingUsersArray = Array.from(waitingUsers.values());
-            const distanceMatrix = [];
-            const maxPairs = Math.min(20, (waitingUsersArray.length * (waitingUsersArray.length - 1)) / 2);
-            
-            let pairCount = 0;
-            for (let i = 0; i < waitingUsersArray.length && pairCount < maxPairs; i++) {
-                for (let j = i + 1; j < waitingUsersArray.length && pairCount < maxPairs; j++) {
-                    const userA = waitingUsersArray[i];
-                    const userB = waitingUsersArray[j];
-                    const distances = calculateCircularTimezoneDistance(userA.chatZone, userB.chatZone);
-                    
-                    distanceMatrix.push({
-                        userA: userA.userId.slice(-8),
-                        userB: userB.userId.slice(-8),
-                        zoneA: userA.chatZone,
-                        zoneB: userB.chatZone,
-                        linearDistance: distances.linear,
-                        circularDistance: distances.circular,
-                        score: calculateTimezoneScore(userA.chatZone, userB.chatZone)
-                    });
-                    pairCount++;
-                }
-            }
-            
-            const performanceStats = {
-                count: requestCount,
-                period: Math.round((Date.now() - lastResetTime) / 1000),
-                rps: requestCount / Math.max(1, (Date.now() - lastResetTime) / 1000)
-            };
-            
             return createCorsResponse({
-                status: 'webrtc-signaling-server-swap-strategy',
+                status: 'ultra-optimized-webrtc-signaling',
                 runtime: 'edge',
-                performanceMode: ENABLE_DETAILED_LOGGING ? 'detailed-logging' : 'optimized-speed',
-                config: {
-                    userTimeout: USER_TIMEOUT,
-                    matchLifetime: MATCH_LIFETIME,
-                    maxWaitingUsers: MAX_WAITING_USERS,
-                    timezoneMaxScore: TIMEZONE_MAX_SCORE,
-                    timezonePenalty: TIMEZONE_PENALTY,
-                    swapCooldown: SWAP_COOLDOWN,
-                    maxSwapAttempts: MAX_SWAP_ATTEMPTS,
-                    detailedLogging: ENABLE_DETAILED_LOGGING
-                },
+                optimizations: [
+                    'indexed-data-structures',
+                    'distance-calculation-cache', 
+                    'pre-calculated-score-tables',
+                    'object-pooling',
+                    'early-exit-strategies',
+                    'batch-operations',
+                    'memory-optimization'
+                ],
                 stats: {
                     waitingUsers: waitingUsers.size,
                     activeMatches: activeMatches.size,
-                    sortedUsers: sortedUsersByTimezone.length,
-                    totalUsers: waitingUsers.size + (activeMatches.size * 2)
+                    cacheSize: distanceCache.size,
+                    poolSizes: {
+                        matchObjects: matchObjectPool.length,
+                        signalObjects: signalObjectPool.length
+                    },
+                    indexStats: {
+                        timezones: timezoneIndex.size,
+                        genders: genderIndex.size,
+                        freshUsers: freshUsersSet.size,
+                        lastRebuild: Date.now() - lastIndexRebuild
+                    }
                 },
-                performance: performanceStats,
-                waitingUserIds: Array.from(waitingUsers.keys()).map(id => id.slice(-8)),
-                activeMatchIds: Array.from(activeMatches.keys()),
-                timezoneDistribution,
-                sortedUsersByTimezone: sortedUsersByTimezone.map(u => ({ 
-                    userId: u.userId.slice(-8), 
-                    chatZone: u.chatZone,
-                    gender: u.userInfo?.gender || 'N/A',
-                    waitTime: Math.round((Date.now() - u.timestamp) / 1000)
-                })),
-                distanceMatrix: distanceMatrix, // Limited pairs for performance
-                swapStrategy: {
-                    enabled: true,
-                    lastSwapTime: lastSwapTime,
-                    timeSinceLastSwap: Date.now() - lastSwapTime,
-                    cooldownRemaining: Math.max(0, SWAP_COOLDOWN - (Date.now() - lastSwapTime))
-                },
-                scoringConfig: {
-                    maxScore: TIMEZONE_MAX_SCORE,
-                    penalty: TIMEZONE_PENALTY,
-                    circleHours: TIMEZONE_CIRCLE_HOURS,
-                    algorithm: 'circular-distance-with-swap',
-                    detailedLogging: ENABLE_DETAILED_LOGGING
+                performance: {
+                    requestCount,
+                    uptime: Date.now() - lastResetTime
                 },
                 timestamp: Date.now()
             });
         }
         
         return createCorsResponse({ 
-            status: 'signaling-ready',
+            status: 'ultra-optimized-signaling-ready',
             runtime: 'edge',
-            performanceMode: ENABLE_DETAILED_LOGGING ? 'detailed-logging' : 'optimized-speed',
             stats: { 
                 waiting: waitingUsers.size, 
                 matches: activeMatches.size,
-                sorted: sortedUsersByTimezone.length
+                cacheSize: distanceCache.size
             },
-            message: 'WebRTC signaling server with swap-based timezone matching ready',
+            message: 'Ultra-optimized WebRTC signaling server ready',
             timestamp: Date.now()
         });
     }
@@ -918,59 +739,37 @@ export default async function handler(req) {
     }
     
     try {
-        // FLEXIBLE JSON PARSING - handle both string and object body như code cũ
+        // FLEXIBLE JSON PARSING
         let data;
         let requestBody = '';
         
         try {
-            // Method 1: Try req.json() first (works in some environments)
-            try {
-                data = await req.json();
-                criticalLog('PARSE-SUCCESS', 'Used req.json() method');
-            } catch (jsonError) {
-                // Method 2: Manual stream reading (for problematic Edge Runtime)
-                if (!req.body) {
-                    return createCorsResponse({ 
-                        error: 'No request body found',
-                        method: req.method,
-                        tip: 'Make sure to send JSON body with your POST request'
-                    }, 400);
-                }
-                
-                // Read body stream
-                const reader = req.body.getReader();
-                const decoder = new TextDecoder();
-                
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    requestBody += decoder.decode(value, { stream: true });
-                }
-                
-                if (!requestBody.trim()) {
-                    return createCorsResponse({ 
-                        error: 'Empty request body',
-                        tip: 'Send JSON data like: {"action":"instant-match","userId":"123"}'
-                    }, 400);
-                }
-                
-                // Parse the body - handle both string and object như code cũ
-                if (typeof requestBody === 'string') {
-                    data = JSON.parse(requestBody);
-                } else {
-                    data = requestBody;
-                }
-                
-                criticalLog('PARSE-SUCCESS', 'Used manual stream reading method');
+            data = await req.json();
+        } catch (jsonError) {
+            if (!req.body) {
+                return createCorsResponse({ 
+                    error: 'No request body found',
+                    tip: 'Send JSON body with your POST request'
+                }, 400);
             }
             
-        } catch (parseError) {
-            return createCorsResponse({ 
-                error: 'Invalid JSON in request body',
-                details: parseError.message,
-                receivedBody: requestBody.substring(0, 200),
-                tip: 'Check your JSON syntax - should be valid JSON object'
-            }, 400);
+            const reader = req.body.getReader();
+            const decoder = new TextDecoder();
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                requestBody += decoder.decode(value, { stream: true });
+            }
+            
+            if (!requestBody.trim()) {
+                return createCorsResponse({ 
+                    error: 'Empty request body',
+                    tip: 'Send JSON data'
+                }, 400);
+            }
+            
+            data = typeof requestBody === 'string' ? JSON.parse(requestBody) : requestBody;
         }
         
         const { action, userId, chatZone } = data;
@@ -978,21 +777,17 @@ export default async function handler(req) {
         if (!userId) {
             return createCorsResponse({ 
                 error: 'userId is required',
-                received: data,
-                tip: 'Include userId in your JSON: {"userId":"your-user-id",...}'
+                tip: 'Include userId in your JSON'
             }, 400);
         }
         
         if (!action) {
             return createCorsResponse({ 
                 error: 'action is required',
-                received: data,
-                validActions: ['instant-match', 'get-signals', 'send-signal', 'p2p-connected', 'disconnect'],
-                tip: 'Include action in your JSON: {"action":"instant-match",...}'
+                validActions: ['instant-match', 'get-signals', 'send-signal', 'p2p-connected', 'disconnect']
             }, 400);
         }
         
-        // Enhanced logging
         criticalLog(`${action.toUpperCase()}`, `${userId.slice(-8)} (Zone: ${chatZone || 'N/A'})`);
         
         switch (action) {
@@ -1010,12 +805,11 @@ export default async function handler(req) {
                 return createCorsResponse({ error: `Unknown action: ${action}` }, 400);
         }
     } catch (error) {
-        criticalLog('SERVER ERROR', `Error: ${error.message} | Stack: ${error.stack}`);
+        criticalLog('SERVER ERROR', `Error: ${error.message}`);
         return createCorsResponse({ 
             error: 'Server error', 
             details: error.message,
-            type: error.name,
-            serverTime: new Date().toISOString()
+            timestamp: Date.now()
         }, 500);
     }
 }
