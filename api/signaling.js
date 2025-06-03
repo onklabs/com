@@ -375,7 +375,7 @@ function handleDisconnect(userId, res) {
 // ==========================================
 
 function cleanup() {
-  return;
+
   const now = Date.now();
   let cleanedUsers = 0;
   let cleanedMatches = 0;
