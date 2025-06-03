@@ -734,7 +734,7 @@ function handleP2pConnected(userId, data) {
         maintainSortedList();
     }
     
-    return createCorsResponse({ 
+    return createCorsResponse({
         status: 'p2p_connected',
         removed,
         timestamp: Date.now()
@@ -1052,14 +1052,47 @@ export default async function handler(req) {
     }
     
     try {
-        // Parse request body với error handling tốt hơn
+        // IMPROVED JSON PARSING cho Edge Runtime
         let data;
+        let requestBody = '';
+        
         try {
-            data = await req.json();
+            // Check if request has body
+            if (!req.body) {
+                return createCorsResponse({ 
+                    error: 'No request body found',
+                    method: req.method,
+                    headers: Object.fromEntries(req.headers.entries()),
+                    tip: 'Make sure to send JSON body with your request'
+                }, 400);
+            }
+            
+            // Read body stream properly for Edge Runtime
+            const reader = req.body.getReader();
+            const decoder = new TextDecoder();
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                requestBody += decoder.decode(value, { stream: true });
+            }
+            
+            // Parse the accumulated body
+            if (!requestBody.trim()) {
+                return createCorsResponse({ 
+                    error: 'Empty request body',
+                    tip: 'Send JSON data like: {"action":"instant-match","userId":"123"}'
+                }, 400);
+            }
+            
+            data = JSON.parse(requestBody);
+            
         } catch (parseError) {
             return createCorsResponse({ 
                 error: 'Invalid JSON in request body',
-                details: parseError.message 
+                details: parseError.message,
+                receivedBody: requestBody.substring(0, 200), // Show first 200 chars
+                tip: 'Check your JSON syntax'
             }, 400);
         }
         
@@ -1069,12 +1102,21 @@ export default async function handler(req) {
             return createCorsResponse({ 
                 error: 'userId is required',
                 received: data,
-                tip: 'Make sure to include userId in your request'
+                tip: 'Include userId in your JSON: {"userId":"your-user-id",...}'
             }, 400);
         }
         
-        // Log request để debug
-        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId.slice(-8)} (ChatZone: ${chatZone || 'N/A'}) | Data:`, JSON.stringify(data));
+        if (!action) {
+            return createCorsResponse({ 
+                error: 'action is required',
+                received: data,
+                validActions: ['instant-match', 'get-signals', 'send-signal', 'p2p-connected', 'disconnect'],
+                tip: 'Include action in your JSON: {"action":"instant-match",...}'
+            }, 400);
+        }
+        
+        // Enhanced logging
+        criticalLog(`${action.toUpperCase()}`, `${userId.slice(-8)} (Zone: ${chatZone || 'N/A'}) | Body: ${requestBody.substring(0, 100)}...`);
         
         switch (action) {
             case 'instant-match': 
