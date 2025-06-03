@@ -101,21 +101,15 @@ function trackRequest() {
 // ==========================================
 
 function validateUserData(data) {
-    const { userId, chatZone, userInfo } = data;
+    const { userId } = data;
     
-    if (!userId || typeof userId !== 'string') {
-        return { valid: false, error: 'Invalid userId' };
+    // Only validate userId - same as signaling (5).js
+    if (!userId) {
+        return { valid: false, error: 'userId is required' };
     }
     
-    if (chatZone !== null && chatZone !== undefined) {
-        if (typeof chatZone !== 'number' || chatZone < -12 || chatZone > 12) {
-            return { valid: false, error: 'Invalid chatZone (must be number between -12 and 12)' };
-        }
-    }
-    
-    if (userInfo && typeof userInfo !== 'object') {
-        return { valid: false, error: 'Invalid userInfo (must be object)' };
-    }
+    // Remove all other validations to match signaling (5).js behavior
+    // No validation for chatZone, userInfo, etc.
     
     return { valid: true };
 }
