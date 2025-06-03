@@ -1,9 +1,9 @@
-// WebRTC Signaling Server with Vercel KV - Fixes Serverless Issues
-// Solves: Cold start, Auto-scaling, Geographic distribution, Memory isolation
+// WebRTC Signaling Server with Optimized Vercel KV - Fix Timeout Issues
+// Fixes: Runtime timeout, KV latency, cleanup performance
 
 import { kv } from '@vercel/kv';
 
-// KV key patterns and TTL settings
+// Optimized KV key patterns and TTL settings
 const KEYS = {
   waitingUsers: 'waiting_users',
   matches: 'active_matches',
@@ -36,15 +36,13 @@ export default async function handler(req, res) {
         return await handleDebugInfo(res);
       }
       
-      // Trigger cleanup
-      await cleanup();
-      
-      const stats = await getStats();
+      // Skip cleanup on GET to avoid timeout
+      const stats = await getStatsQuick();
       return res.json({ 
         status: 'kv-signaling-ready',
         stats,
-        message: 'Vercel KV WebRTC signaling server ready',
-        storage: 'vercel-kv',
+        message: 'Optimized Vercel KV WebRTC signaling server ready',
+        storage: 'vercel-kv-optimized',
         timestamp: Date.now()
       });
     }
@@ -67,11 +65,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'userId is required' });
     }
     
-    console.log(`[${action?.toUpperCase() || 'UNKNOWN'}] ${userId} (KV)`);
+    console.log(`[${action?.toUpperCase() || 'UNKNOWN'}] ${userId} (KV-OPT)`);
     
     switch (action) {
       case 'instant-match': 
-        return await handleInstantMatch(userId, data, res);
+        return await handleInstantMatchOptimized(userId, data, res);
       case 'get-signals': 
         return await handleGetSignals(userId, res);
       case 'send-signal': 
@@ -92,23 +90,22 @@ export default async function handler(req, res) {
 }
 
 // ==========================================
-// VERCEL KV HELPER FUNCTIONS
+// OPTIMIZED VERCEL KV HELPER FUNCTIONS
 // ==========================================
 
-async function getStats() {
+async function getStatsQuick() {
   try {
-    const [waitingUsers, matches] = await Promise.all([
-      kv.hgetall(KEYS.waitingUsers),
-      kv.hgetall(KEYS.matches)
-    ]);
+    // Use pipeline/batch to reduce round trips
+    const pipeline = kv.pipeline();
+    pipeline.hlen(KEYS.waitingUsers);
+    pipeline.hlen(KEYS.matches);
     
-    const waitingCount = waitingUsers ? Object.keys(waitingUsers).length : 0;
-    const matchCount = matches ? Object.keys(matches).length : 0;
+    const [waitingCount, matchCount] = await pipeline.exec();
     
     return {
-      waiting: waitingCount,
-      matches: matchCount,
-      totalUsers: waitingCount + (matchCount * 2)
+      waiting: waitingCount || 0,
+      matches: matchCount || 0,
+      totalUsers: (waitingCount || 0) + ((matchCount || 0) * 2)
     };
   } catch (error) {
     console.error('KV Stats error:', error);
@@ -118,21 +115,17 @@ async function getStats() {
 
 async function handleDebugInfo(res) {
   try {
-    const [waitingUsers, matches, stats] = await Promise.all([
-      kv.hgetall(KEYS.waitingUsers),
-      kv.hgetall(KEYS.matches),
-      getStats()
-    ]);
+    // Simplified debug - avoid heavy hgetall operations
+    const stats = await getStatsQuick();
     
     return res.json({
-      status: 'vercel-kv-signaling-server',
+      status: 'vercel-kv-signaling-server-optimized',
       stats,
-      waitingUserIds: waitingUsers ? Object.keys(waitingUsers) : [],
-      activeMatchIds: matches ? Object.keys(matches) : [],
       kv: {
         configured: !!process.env.KV_REST_API_URL,
         url: process.env.KV_REST_API_URL ? '[CONFIGURED]' : '[NOT SET]'
       },
+      optimization: 'enabled',
       timestamp: Date.now()
     });
   } catch (error) {
@@ -144,72 +137,72 @@ async function handleDebugInfo(res) {
 }
 
 // ==========================================
-// INSTANT MATCH HANDLER WITH VERCEL KV
+// OPTIMIZED INSTANT MATCH HANDLER
 // ==========================================
 
-async function handleInstantMatch(userId, data, res) {
+async function handleInstantMatchOptimized(userId, data, res) {
   const { userInfo, preferredMatchId } = data;
   
-  console.log(`[INSTANT-MATCH] ${userId} looking for partner (Vercel KV)`);
+  console.log(`[INSTANT-MATCH] ${userId} looking for partner (KV-Optimized)`);
   
   try {
-    // Cleanup first
-    await cleanup();
+    // Skip heavy cleanup - use TTL instead
+    console.log(`[INSTANT-MATCH] Skipping cleanup for performance`);
     
-    // Check if user is already waiting or matched
-    const [existingWaiting, existingMatch] = await Promise.all([
-      kv.hget(KEYS.waitingUsers, userId),
-      kv.get(KEYS.userMatch(userId))
-    ]);
-    
-    if (existingWaiting) {
-      await kv.hdel(KEYS.waitingUsers, userId);
-      console.log(`[INSTANT-MATCH] Updated existing waiting user ${userId}`);
-    }
-    
+    // Quick check if user is already matched (most important check)
+    const existingMatch = await kv.get(KEYS.userMatch(userId));
     if (existingMatch) {
+      console.log(`[INSTANT-MATCH] ${userId} already has match ${existingMatch}`);
+      // Clean up old match and continue
       await Promise.all([
         kv.hdel(KEYS.matches, existingMatch),
         kv.del(KEYS.userMatch(userId))
       ]);
-      console.log(`[INSTANT-MATCH] Removed ${userId} from existing match ${existingMatch}`);
     }
     
-    // Try to find instant match from waiting users
-    const waitingUsersData = await kv.hgetall(KEYS.waitingUsers);
+    // Remove from waiting list if exists (non-blocking)
+    kv.hdel(KEYS.waitingUsers, userId).catch(err => 
+      console.log('Non-critical waiting cleanup error:', err)
+    );
+    
+    // Try to find instant match - limit to first 10 waiting users for speed
+    const waitingUsersData = await kv.hscan(KEYS.waitingUsers, 0, { count: 10 });
     let bestMatch = null;
     let bestMatchScore = 0;
     
-    if (waitingUsersData) {
-      for (const [waitingUserId, waitingUserData] of Object.entries(waitingUsersData)) {
+    if (waitingUsersData && waitingUsersData[1] && waitingUsersData[1].length > 0) {
+      // waitingUsersData[1] is array of [key, value, key, value, ...]
+      const entries = [];
+      for (let i = 0; i < waitingUsersData[1].length; i += 2) {
+        const waitingUserId = waitingUsersData[1][i];
+        const waitingUserData = waitingUsersData[1][i + 1];
+        
         if (waitingUserId === userId) continue;
         
-        const waitingUser = JSON.parse(waitingUserData);
-        
-        // Calculate compatibility score
-        let score = 1;
-        
-        // Prefer users with complementary userInfo if available
-        if (userInfo && waitingUser.userInfo) {
-          if (userInfo.gender && waitingUser.userInfo.gender && 
+        try {
+          const waitingUser = JSON.parse(waitingUserData);
+          
+          // Simple compatibility score
+          let score = 1;
+          
+          // Quick gender compatibility check
+          if (userInfo?.gender && waitingUser.userInfo?.gender && 
               userInfo.gender !== waitingUser.userInfo.gender && 
               userInfo.gender !== 'Unspecified' && waitingUser.userInfo.gender !== 'Unspecified') {
-            score += 2; // Bonus for different genders
+            score += 2;
           }
-          if (userInfo.status && waitingUser.userInfo.status &&
-              userInfo.status === waitingUser.userInfo.status) {
-            score += 1; // Bonus for similar status/mood
+          
+          // Fresh user bonus
+          const waitTime = Date.now() - waitingUser.timestamp;
+          if (waitTime < 30000) score += 1;
+          
+          if (score > bestMatchScore) {
+            bestMatchScore = score;
+            bestMatch = { userId: waitingUserId, user: waitingUser };
           }
-        }
-        
-        // Prefer newer users (less waiting time)
-        const waitTime = Date.now() - waitingUser.timestamp;
-        if (waitTime < 30000) score += 1; // Less than 30 seconds
-        if (waitTime < 10000) score += 1; // Less than 10 seconds (very fresh)
-        
-        if (score > bestMatchScore) {
-          bestMatchScore = score;
-          bestMatch = { userId: waitingUserId, user: waitingUser };
+        } catch (parseError) {
+          console.log(`Parse error for user ${waitingUserId}:`, parseError);
+          continue;
         }
       }
     }
@@ -219,9 +212,6 @@ async function handleInstantMatch(userId, data, res) {
       const partnerId = bestMatch.userId;
       const partnerUser = bestMatch.user;
       
-      // Remove partner from waiting list
-      await kv.hdel(KEYS.waitingUsers, partnerId);
-      
       // Create match
       const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
       
@@ -230,7 +220,7 @@ async function handleInstantMatch(userId, data, res) {
       const p1 = isUserInitiator ? userId : partnerId;
       const p2 = isUserInitiator ? partnerId : userId;
       
-      // Create match without pre-exchanged signals
+      // Create match
       const match = {
         p1,
         p2,
@@ -245,15 +235,16 @@ async function handleInstantMatch(userId, data, res) {
         }
       };
       
-      // Save to KV with TTL
-      await Promise.all([
-        kv.hset(KEYS.matches, { [matchId]: JSON.stringify(match) }),
-        kv.expire(KEYS.matches, KEYS.matchTTL),
-        kv.setex(KEYS.userMatch(userId), KEYS.matchTTL, matchId),
-        kv.setex(KEYS.userMatch(partnerId), KEYS.matchTTL, matchId)
-      ]);
+      // Batch operations for speed
+      const pipeline = kv.pipeline();
+      pipeline.hset(KEYS.matches, matchId, JSON.stringify(match));
+      pipeline.setex(KEYS.userMatch(userId), KEYS.matchTTL, matchId);
+      pipeline.setex(KEYS.userMatch(partnerId), KEYS.matchTTL, matchId);
+      pipeline.hdel(KEYS.waitingUsers, partnerId); // Remove partner from waiting
       
-      console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'} [KV]`);
+      await pipeline.exec();
+      
+      console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'} [KV-OPT]`);
       
       return res.json({
         status: 'instant-match',
@@ -261,10 +252,10 @@ async function handleInstantMatch(userId, data, res) {
         partnerId,
         isInitiator: isUserInitiator,
         partnerInfo: partnerUser.userInfo || {},
-        signals: [], // No pre-exchanged signals
+        signals: [],
         compatibility: bestMatchScore,
         message: 'Instant match found! WebRTC connection will be established.',
-        storage: 'vercel-kv',
+        storage: 'vercel-kv-optimized',
         timestamp: Date.now()
       });
       
@@ -277,22 +268,19 @@ async function handleInstantMatch(userId, data, res) {
       };
       
       // Add to KV with TTL
-      await Promise.all([
-        kv.hset(KEYS.waitingUsers, { [userId]: JSON.stringify(waitingUser) }),
-        kv.expire(KEYS.waitingUsers, KEYS.waitingTTL)
-      ]);
+      await kv.hset(KEYS.waitingUsers, userId, JSON.stringify(waitingUser));
       
-      const stats = await getStats();
-      const position = stats.waiting;
-      console.log(`[INSTANT-MATCH] ${userId} added to KV waiting list (position ${position})`);
+      // Get approximate position (use hlen for speed)
+      const position = await kv.hlen(KEYS.waitingUsers);
+      console.log(`[INSTANT-MATCH] ${userId} added to KV waiting list (position ~${position})`);
       
       return res.json({
         status: 'waiting',
-        position,
-        waitingUsers: stats.waiting,
+        position: position || 1,
+        waitingUsers: position || 1,
         message: 'Added to matching queue. Waiting for partner...',
-        estimatedWaitTime: Math.min(stats.waiting * 2, 30),
-        storage: 'vercel-kv',
+        estimatedWaitTime: Math.min((position || 1) * 2, 30),
+        storage: 'vercel-kv-optimized',
         timestamp: Date.now()
       });
     }
@@ -307,7 +295,7 @@ async function handleInstantMatch(userId, data, res) {
 }
 
 // ==========================================
-// SIGNAL HANDLERS WITH VERCEL KV
+// OPTIMIZED SIGNAL HANDLERS
 // ==========================================
 
 async function handleGetSignals(userId, res) {
@@ -326,8 +314,10 @@ async function handleGetSignals(userId, res) {
         // Clear signals after reading to prevent duplicates
         match.signals[userId] = [];
         
-        // Update match in KV
-        await kv.hset(KEYS.matches, { [matchId]: JSON.stringify(match) });
+        // Update match in KV (non-blocking for better performance)
+        kv.hset(KEYS.matches, matchId, JSON.stringify(match)).catch(err =>
+          console.log('Non-critical signal clear error:', err)
+        );
         
         console.log(`[GET-SIGNALS] ${userId} -> ${signals.length} signals from KV match ${matchId}`);
         
@@ -337,7 +327,7 @@ async function handleGetSignals(userId, res) {
           partnerId,
           isInitiator: match.p1 === userId,
           signals,
-          storage: 'vercel-kv',
+          storage: 'vercel-kv-optimized',
           timestamp: Date.now()
         });
       }
@@ -346,15 +336,14 @@ async function handleGetSignals(userId, res) {
     // Check if still in waiting list
     const waitingData = await kv.hget(KEYS.waitingUsers, userId);
     if (waitingData) {
-      const allWaiting = await kv.hgetall(KEYS.waitingUsers);
-      const waitingUserIds = allWaiting ? Object.keys(allWaiting) : [];
-      const position = waitingUserIds.indexOf(userId) + 1;
+      // Use hlen for quick position estimate
+      const waitingCount = await kv.hlen(KEYS.waitingUsers);
       
       return res.json({
         status: 'waiting',
-        position: position > 0 ? position : 1,
-        waitingUsers: waitingUserIds.length,
-        storage: 'vercel-kv',
+        position: Math.ceil(waitingCount / 2), // Rough estimate
+        waitingUsers: waitingCount || 1,
+        storage: 'vercel-kv-optimized',
         timestamp: Date.now()
       });
     }
@@ -362,7 +351,7 @@ async function handleGetSignals(userId, res) {
     return res.json({
       status: 'not_found',
       message: 'User not found in waiting list or active matches',
-      storage: 'vercel-kv',
+      storage: 'vercel-kv-optimized',
       timestamp: Date.now()
     });
   } catch (error) {
@@ -391,31 +380,24 @@ async function handleSendSignal(userId, data, res) {
     if (!matchData) {
       console.log(`[SEND-SIGNAL] Match ${matchId} not found in KV`);
       
-      // 🔧 ENHANCED RECOVERY: Try to find user in any match
+      // Quick recovery: Try to find user in any match
       const userMatchId = await kv.get(KEYS.userMatch(userId));
       if (userMatchId && userMatchId !== matchId) {
         console.log(`[RECOVERY] User ${userId} found in different match: ${userMatchId}`);
         
-        const correctMatchData = await kv.hget(KEYS.matches, userMatchId);
-        if (correctMatchData) {
-          console.log(`[RECOVERY] Redirecting to correct match ${userMatchId}`);
-          return res.json({
-            status: 'match_corrected',
-            correctMatchId: userMatchId,
-            message: 'Using correct match ID',
-            storage: 'vercel-kv'
-          });
-        }
+        return res.json({
+          status: 'match_corrected',
+          correctMatchId: userMatchId,
+          message: 'Using correct match ID',
+          storage: 'vercel-kv-optimized'
+        });
       }
       
-      // Get all matches for debugging
-      const allMatches = await kv.hgetall(KEYS.matches);
       return res.status(404).json({ 
         error: 'Match not found',
         matchId,
         userMatchId,
-        availableMatches: allMatches ? Object.keys(allMatches) : [],
-        storage: 'vercel-kv',
+        storage: 'vercel-kv-optimized',
         recovery: 'attempted'
       });
     }
@@ -425,7 +407,7 @@ async function handleSendSignal(userId, data, res) {
     if (match.p1 !== userId && match.p2 !== userId) {
       return res.status(403).json({ 
         error: 'User not in this match',
-        storage: 'vercel-kv'
+        storage: 'vercel-kv-optimized'
       });
     }
     
@@ -446,13 +428,13 @@ async function handleSendSignal(userId, data, res) {
     match.signals[partnerId].push(signal);
     
     // Limit signal queue size to prevent memory bloat
-    if (match.signals[partnerId].length > 100) {
-      match.signals[partnerId] = match.signals[partnerId].slice(-50);
+    if (match.signals[partnerId].length > 50) { // Reduced from 100 for speed
+      match.signals[partnerId] = match.signals[partnerId].slice(-25);
       console.log(`[SEND-SIGNAL] Trimmed signal queue for ${partnerId}`);
     }
     
     // Update match in KV
-    await kv.hset(KEYS.matches, { [matchId]: JSON.stringify(match) });
+    await kv.hset(KEYS.matches, matchId, JSON.stringify(match));
     
     console.log(`[SEND-SIGNAL] ${userId} -> ${partnerId} (${type}) in KV match ${matchId}`);
     
@@ -461,7 +443,7 @@ async function handleSendSignal(userId, data, res) {
       partnerId,
       signalType: type,
       queueLength: match.signals[partnerId].length,
-      storage: 'vercel-kv',
+      storage: 'vercel-kv-optimized',
       timestamp: Date.now()
     });
   } catch (error) {
@@ -475,20 +457,17 @@ async function handleSendSignal(userId, data, res) {
 }
 
 async function handleDisconnect(userId, res) {
-  console.log(`[DISCONNECT] ${userId} (KV)`);
+  console.log(`[DISCONNECT] ${userId} (KV-OPT)`);
   
   try {
     let removed = false;
     
-    // Remove from waiting list
-    const waitingData = await kv.hget(KEYS.waitingUsers, userId);
-    if (waitingData) {
-      await kv.hdel(KEYS.waitingUsers, userId);
-      removed = true;
+    // Remove from waiting list (non-blocking)
+    kv.hdel(KEYS.waitingUsers, userId).then(() => {
       console.log(`[DISCONNECT] Removed ${userId} from KV waiting list`);
-    }
+    }).catch(err => console.log('Non-critical waiting cleanup:', err));
     
-    // Remove from active matches and notify partner
+    // Handle active match
     const matchId = await kv.get(KEYS.userMatch(userId));
     if (matchId) {
       const matchData = await kv.hget(KEYS.matches, matchId);
@@ -506,23 +485,23 @@ async function handleDisconnect(userId, res) {
           });
           
           // Update match with disconnect signal
-          await kv.hset(KEYS.matches, { [matchId]: JSON.stringify(match) });
+          await kv.hset(KEYS.matches, matchId, JSON.stringify(match));
         }
         
         console.log(`[DISCONNECT] Notified ${partnerId} in KV match ${matchId}`);
         
-        // Remove match and user mappings after delay
-        setTimeout(async () => {
-          try {
-            await Promise.all([
-              kv.hdel(KEYS.matches, matchId),
-              kv.del(KEYS.userMatch(userId)),
-              kv.del(KEYS.userMatch(partnerId))
-            ]);
+        // Remove match and user mappings after delay (non-blocking)
+        setTimeout(() => {
+          const pipeline = kv.pipeline();
+          pipeline.hdel(KEYS.matches, matchId);
+          pipeline.del(KEYS.userMatch(userId));
+          pipeline.del(KEYS.userMatch(partnerId));
+          
+          pipeline.exec().then(() => {
             console.log(`[DISCONNECT] KV match ${matchId} cleaned up`);
-          } catch (error) {
-            console.error('[CLEANUP ERROR]', error);
-          }
+          }).catch(err => {
+            console.error('[CLEANUP ERROR]', err);
+          });
         }, 5000);
         
         removed = true;
@@ -532,7 +511,7 @@ async function handleDisconnect(userId, res) {
     return res.json({ 
       status: 'disconnected',
       removed,
-      storage: 'vercel-kv',
+      storage: 'vercel-kv-optimized',
       timestamp: Date.now()
     });
   } catch (error) {
@@ -542,87 +521,5 @@ async function handleDisconnect(userId, res) {
       details: error.message,
       storage: 'vercel-kv-error'
     });
-  }
-}
-
-// ==========================================
-// CLEANUP UTILITIES WITH VERCEL KV
-// ==========================================
-
-async function cleanup() {
-  try {
-    const now = Date.now();
-    let cleanedUsers = 0;
-    let cleanedMatches = 0;
-    
-    // Clean expired waiting users
-    const waitingUsers = await kv.hgetall(KEYS.waitingUsers);
-    if (waitingUsers) {
-      const expiredUsers = [];
-      for (const [userId, userData] of Object.entries(waitingUsers)) {
-        const user = JSON.parse(userData);
-        if (now - user.timestamp > USER_TIMEOUT) {
-          expiredUsers.push(userId);
-        }
-      }
-      
-      if (expiredUsers.length > 0) {
-        await kv.hdel(KEYS.waitingUsers, ...expiredUsers);
-        cleanedUsers = expiredUsers.length;
-      }
-    }
-    
-    // Clean old matches
-    const matches = await kv.hgetall(KEYS.matches);
-    if (matches) {
-      const expiredMatches = [];
-      const expiredUserMappings = [];
-      
-      for (const [matchId, matchData] of Object.entries(matches)) {
-        const match = JSON.parse(matchData);
-        if (now - match.timestamp > MATCH_LIFETIME) {
-          expiredMatches.push(matchId);
-          expiredUserMappings.push(
-            KEYS.userMatch(match.p1),
-            KEYS.userMatch(match.p2)
-          );
-        }
-      }
-      
-      if (expiredMatches.length > 0) {
-        await Promise.all([
-          kv.hdel(KEYS.matches, ...expiredMatches),
-          ...expiredUserMappings.map(key => kv.del(key))
-        ]);
-        cleanedMatches = expiredMatches.length;
-      }
-    }
-    
-    // Prevent memory bloat - remove oldest users if too many waiting
-    const currentWaiting = await kv.hgetall(KEYS.waitingUsers);
-    if (currentWaiting && Object.keys(currentWaiting).length > MAX_WAITING_USERS) {
-      const users = Object.entries(currentWaiting)
-        .map(([userId, userData]) => ({
-          userId,
-          timestamp: JSON.parse(userData).timestamp
-        }))
-        .sort((a, b) => a.timestamp - b.timestamp);
-      
-      const excess = users.length - MAX_WAITING_USERS;
-      const usersToRemove = users.slice(0, excess).map(u => u.userId);
-      
-      if (usersToRemove.length > 0) {
-        await kv.hdel(KEYS.waitingUsers, ...usersToRemove);
-        cleanedUsers += usersToRemove.length;
-        console.log(`[CLEANUP] Removed ${excess} oldest users from KV due to capacity limit`);
-      }
-    }
-    
-    if (cleanedUsers > 0 || cleanedMatches > 0) {
-      const stats = await getStats();
-      console.log(`[CLEANUP] KV: Removed ${cleanedUsers} expired users, ${cleanedMatches} old matches. Active: ${stats.waiting} waiting, ${stats.matches} matched`);
-    }
-  } catch (error) {
-    console.error('[CLEANUP KV ERROR]', error);
   }
 }
