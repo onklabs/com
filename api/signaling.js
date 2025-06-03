@@ -807,10 +807,7 @@ function cleanup() {
 // MAIN HANDLER FUNCTION
 // ==========================================
 
-export default async function handler(req) {
-    // Track request performance
-    trackRequest();
-    
+export default async function handler(req) {   
     // Trigger cleanup on every request
     cleanup();
     
