@@ -373,9 +373,18 @@ function findClosestPartners(userChatZone, userId) {
 function handleInstantMatch(userId, data) {
     const { userInfo, preferredMatchId, chatZone, gender } = data;
     
-    const validation = validateUserData(data);
-    if (!validation.valid) {
-        return createCorsResponse({ error: validation.error }, 400);
+    // RELAXED VALIDATION - chỉ check userId required
+    if (!userId || typeof userId !== 'string') {
+        return createCorsResponse({ error: 'userId is required and must be string' }, 400);
+    }
+    
+    // Optional validation cho chatZone - allow null/undefined
+    if (chatZone !== null && chatZone !== undefined && 
+        (typeof chatZone !== 'number' || chatZone < -12 || chatZone > 12)) {
+        return createCorsResponse({ 
+            error: 'Invalid chatZone - must be number between -12 and 12, or null/undefined',
+            received: { chatZone, type: typeof chatZone }
+        }, 400);
     }
     
     smartLog('INSTANT-MATCH', `${userId.slice(-8)} looking for partner (ChatZone: ${chatZone})`);
@@ -1043,16 +1052,29 @@ export default async function handler(req) {
     }
     
     try {
-        // Parse request body
-        const data = await req.json();
+        // Parse request body với error handling tốt hơn
+        let data;
+        try {
+            data = await req.json();
+        } catch (parseError) {
+            return createCorsResponse({ 
+                error: 'Invalid JSON in request body',
+                details: parseError.message 
+            }, 400);
+        }
         
         const { action, userId, chatZone } = data;
         
         if (!userId) {
-            return createCorsResponse({ error: 'userId is required' }, 400);
+            return createCorsResponse({ 
+                error: 'userId is required',
+                received: data,
+                tip: 'Make sure to include userId in your request'
+            }, 400);
         }
         
-        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId.slice(-8)} (ChatZone: ${chatZone || 'N/A'})`);
+        // Log request để debug
+        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId.slice(-8)} (ChatZone: ${chatZone || 'N/A'}) | Data:`, JSON.stringify(data));
         
         switch (action) {
             case 'instant-match': 
@@ -1069,8 +1091,13 @@ export default async function handler(req) {
                 return createCorsResponse({ error: `Unknown action: ${action}` }, 400);
         }
     } catch (error) {
-        criticalLog('SERVER ERROR', error);
-        return createCorsResponse({ error: 'Server error', details: error.message }, 500);
+        criticalLog('SERVER ERROR', `Error: ${error.message} | Stack: ${error.stack}`);
+        return createCorsResponse({ 
+            error: 'Server error', 
+            details: error.message,
+            type: error.name,
+            serverTime: new Date().toISOString()
+        }, 500);
     }
 }
 
