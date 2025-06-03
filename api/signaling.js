@@ -1,24 +1,17 @@
-// Helper function to safely parse environment variables
-function parseEnvInt(envVar, defaultValue) {
-    const value = process.env.get(envVar);
-    if (!value) return defaultValue;
-    const parsed = parseInt(value, 10);
-    return (!isNaN(parsed) && parsed > 0) ? parsed : defaultValue;
-}
 
 // 🚀 PERFORMANCE TOGGLE - Controlled by environment variable
 // Set ENABLE_DETAILED_LOGGING=true in Vercel environment variables for detailed logs
 // Set ENABLE_DETAILED_LOGGING=false or leave empty for production speed
-const ENABLE_DETAILED_LOGGING = process.env.get('ENABLE_DETAILED_LOGGING') === 'true';
+const ENABLE_DETAILED_LOGGING = 'false';
 
 // Configuration constants - Controlled by environment variables with fallback defaults
-const USER_TIMEOUT = parseEnvInt('USER_TIMEOUT', 120000); // 2 minutes for waiting users
-const MATCH_LIFETIME = parseEnvInt('MATCH_LIFETIME', 600000); // 10 minutes for active matches
-const MAX_WAITING_USERS = parseEnvInt('MAX_WAITING_USERS', 120000); // Prevent memory bloat
+const USER_TIMEOUT =  120000; // 2 minutes for waiting users
+const MATCH_LIFETIME =  600000; // 10 minutes for active matches
+const MAX_WAITING_USERS = 120000; // Prevent memory bloat
 
 // Timezone scoring constants - Tunable via environment variables
-const TIMEZONE_MAX_SCORE = parseEnvInt('TIMEZONE_MAX_SCORE', 20); // Maximum points for same timezone
-const TIMEZONE_PENALTY = parseEnvInt('TIMEZONE_PENALTY', 1); // Points deducted per hour difference
+const TIMEZONE_MAX_SCORE = 20; // Maximum points for same timezone
+const TIMEZONE_PENALTY =  1; // Points deducted per hour difference
 const TIMEZONE_CIRCLE_HOURS = 24; // 24-hour timezone circle (fixed)
 
 
