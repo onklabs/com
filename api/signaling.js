@@ -1,17 +1,19 @@
-// Simplified Vercel KV WebRTC Signaling Server
-// CHỈ 4 functions: join-queue, poll-match, disconnect, health
-// Clients direct Redis access cho signals/ICE
+// Complete Vercel KV WebRTC Signaling Server - Server Proxy Architecture
+// 8 endpoints: join-queue, poll-match, send-signal, get-signals, send-ice, get-ice, connection-ready, disconnect
 
 import { kv } from '@vercel/kv';
 
 // Constants
 const MATCH_TIMEOUT = 300; // 5 minutes TTL
 const MAX_QUEUE_SIZE = 100; // Max users per timezone queue
+const MAX_ICE_CANDIDATES = 20; // Max ICE candidates per user per match
 
 // In-memory stats
 let serverStats = {
   totalMatches: 0,
   activeMatches: 0,
+  totalSignals: 0,
+  totalICE: 0,
   startTime: Date.now()
 };
 
@@ -50,34 +52,58 @@ export default async function handler(req, res) {
         return await handleJoinQueue(userId, data, res);
       case 'poll-match':
         return await handlePollMatch(userId, res);
+      case 'send-signal':
+        return await handleSendSignal(userId, data, res);
+      case 'get-signals':
+        return await handleGetSignals(userId, data, res);
+      case 'send-ice':
+        return await handleSendICE(userId, data, res);
+      case 'get-ice':
+        return await handleGetICE(userId, data, res);
+      case 'connection-ready':
+        return await handleConnectionReady(userId, data, res);
       case 'disconnect':
         return await handleDisconnect(userId, res);
       default:
-        return res.status(400).json({ error: 'Unknown action. Supported: join-queue, poll-match, disconnect' });
+        return res.status(400).json({ 
+          error: 'Unknown action',
+          supportedActions: ['join-queue', 'poll-match', 'send-signal', 'get-signals', 'send-ice', 'get-ice', 'connection-ready', 'disconnect']
+        });
     }
   } catch (error) {
     console.error('[SIGNALING] Error:', error);
-    return res.status(500).json({ error: 'Server error', details: error.message });
+    return res.status(500).json({ 
+      error: 'Server error', 
+      details: error.message,
+      timestamp: Date.now()
+    });
   }
 }
 
 // Health check endpoint
 async function handleHealthCheck(res) {
   try {
-    // Test KV connection
-    await kv.ping();
+    // Test KV connection with timeout
+    const pingPromise = kv.ping();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('KV timeout')), 3000)
+    );
+    
+    await Promise.race([pingPromise, timeoutPromise]);
     
     const uptime = Date.now() - serverStats.startTime;
     
-    // Get queue lengths
-    const queueStats = await Promise.all([
-      kv.llen('waiting_queue:global').catch(() => 0),
-      kv.llen('waiting_queue:gmt+7').catch(() => 0),
-      kv.llen('waiting_queue:gmt+8').catch(() => 0),
-      kv.llen('waiting_queue:gmt-5').catch(() => 0)
+    // Get queue lengths (with error handling)
+    const queueStats = await Promise.allSettled([
+      kv.llen('waiting_queue:global'),
+      kv.llen('waiting_queue:gmt+7'),
+      kv.llen('waiting_queue:gmt+8'),
+      kv.llen('waiting_queue:gmt-5')
     ]);
     
-    const totalWaiting = queueStats.reduce((sum, count) => sum + (count || 0), 0);
+    const totalWaiting = queueStats.reduce((sum, result) => {
+      return sum + (result.status === 'fulfilled' ? (result.value || 0) : 0);
+    }, 0);
     
     return res.json({
       status: 'healthy',
@@ -86,19 +112,20 @@ async function handleHealthCheck(res) {
         ...serverStats,
         totalWaiting,
         queueLengths: {
-          global: queueStats[0],
-          'gmt+7': queueStats[1], 
-          'gmt+8': queueStats[2],
-          'gmt-5': queueStats[3]
+          global: queueStats[0].status === 'fulfilled' ? queueStats[0].value : 0,
+          'gmt+7': queueStats[1].status === 'fulfilled' ? queueStats[1].value : 0,
+          'gmt+8': queueStats[2].status === 'fulfilled' ? queueStats[2].value : 0,
+          'gmt-5': queueStats[3].status === 'fulfilled' ? queueStats[3].value : 0
         },
         timestamp: Date.now()
       },
-      message: 'Signaling server ready. Clients use direct Redis for signals/ICE.'
+      message: 'Signaling server ready with server proxy architecture'
     });
   } catch (error) {
     return res.status(503).json({
       status: 'unhealthy',
-      error: error.message
+      error: error.message,
+      timestamp: Date.now()
     });
   }
 }
@@ -200,11 +227,7 @@ async function handleJoinQueue(userId, data, res) {
         partnerId,
         isInitiator: userId === p1,
         timezone: userTimezone,
-        message: `Matched with ${partnerId}! Use direct Redis for signaling.`,
-        instructions: {
-          signals: `Use KV_REST_API_URL for: signals:${matchId}:${partnerId} (send) and signals:${matchId}:${userId} (receive)`,
-          ice: `Use KV_REST_API_URL for: ice:${matchId}:${partnerId} (send) and ice:${matchId}:${userId} (receive)`
-        }
+        message: `Matched with ${partnerId}! Start signaling.`
       });
       
     } else {
@@ -241,7 +264,7 @@ async function handleJoinQueue(userId, data, res) {
         position,
         estimatedWait,
         timezone: userTimezone,
-        message: `Added to ${userTimezone} queue. Position: ${position}, estimated wait: ${estimatedWait}s`
+        message: `Added to ${userTimezone} queue. Position: ${position}`
       });
     }
     
@@ -254,7 +277,7 @@ async function handleJoinQueue(userId, data, res) {
   }
 }
 
-// Poll for match status (Optional - cho UI updates)
+// Poll for match status
 async function handlePollMatch(userId, res) {
   try {
     const userData = await kv.hgetall(`users:${userId}`);
@@ -305,11 +328,7 @@ async function handlePollMatch(userId, res) {
         partnerId,
         isInitiator: matchData.p1 === userId,
         connectionReady: matchData.status === 'connected',
-        message: 'Match active. Use direct Redis for signaling.',
-        instructions: {
-          signals: `signals:${userData.matchId}:${partnerId} (send), signals:${userData.matchId}:${userId} (receive)`,
-          ice: `ice:${userData.matchId}:${partnerId} (send), ice:${userData.matchId}:${userId} (receive)`
-        }
+        message: 'Match active. Ready for signaling.'
       });
     }
     
@@ -328,9 +347,253 @@ async function handlePollMatch(userId, res) {
   }
 }
 
-// Disconnect user và cleanup
+// Send signaling data (offer/answer)
+async function handleSendSignal(userId, data, res) {
+  try {
+    const { matchId, type, signal } = data;
+    
+    if (!matchId || !type || !signal) {
+      return res.status(400).json({ error: 'Missing required fields: matchId, type, signal' });
+    }
+    
+    if (!['offer', 'answer'].includes(type)) {
+      return res.status(400).json({ error: 'Signal type must be "offer" or "answer"' });
+    }
+    
+    // Verify match exists and user is participant
+    const matchData = await kv.hgetall(`matches:${matchId}`);
+    if (!matchData || (matchData.p1 !== userId && matchData.p2 !== userId)) {
+      return res.status(403).json({ error: 'Invalid match or unauthorized' });
+    }
+    
+    const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+    const signalKey = `signals:${matchId}:${partnerId}`;
+    
+    // Store signal for partner
+    await kv.hset(signalKey, {
+      [type]: JSON.stringify(signal),
+      timestamp: Date.now().toString(),
+      from: userId
+    });
+    await kv.expire(signalKey, MATCH_TIMEOUT);
+    
+    serverStats.totalSignals++;
+    
+    return res.json({
+      status: 'sent',
+      type,
+      partnerId,
+      timestamp: Date.now(),
+      message: `${type} signal sent to ${partnerId}`
+    });
+    
+  } catch (error) {
+    console.error('[SEND_SIGNAL] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to send signal',
+      details: error.message 
+    });
+  }
+}
+
+// Get signaling data
+async function handleGetSignals(userId, data, res) {
+  try {
+    const { matchId } = data;
+    
+    if (!matchId) {
+      return res.status(400).json({ error: 'Missing matchId' });
+    }
+    
+    const signalKey = `signals:${matchId}:${userId}`;
+    const signals = await kv.hgetall(signalKey);
+    
+    if (!signals || Object.keys(signals).length === 0) {
+      return res.json({
+        status: 'no_signals',
+        signals: {},
+        count: 0
+      });
+    }
+    
+    // Parse signals
+    const parsedSignals = {};
+    for (const [key, value] of Object.entries(signals)) {
+      if (key !== 'timestamp' && key !== 'from') {
+        try {
+          parsedSignals[key] = JSON.parse(value);
+        } catch (e) {
+          parsedSignals[key] = value;
+        }
+      }
+    }
+    
+    // Clear signals after reading
+    await kv.del(signalKey);
+    
+    return res.json({
+      status: 'received',
+      signals: parsedSignals,
+      count: Object.keys(parsedSignals).length,
+      timestamp: signals.timestamp,
+      from: signals.from
+    });
+    
+  } catch (error) {
+    console.error('[GET_SIGNALS] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to get signals',
+      details: error.message 
+    });
+  }
+}
+
+// Send ICE candidate
+async function handleSendICE(userId, data, res) {
+  try {
+    const { matchId, candidate } = data;
+    
+    if (!matchId || !candidate) {
+      return res.status(400).json({ error: 'Missing required fields: matchId, candidate' });
+    }
+    
+    // Verify match
+    const matchData = await kv.hgetall(`matches:${matchId}`);
+    if (!matchData || (matchData.p1 !== userId && matchData.p2 !== userId)) {
+      return res.status(403).json({ error: 'Invalid match or unauthorized' });
+    }
+    
+    const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+    const iceKey = `ice:${matchId}:${partnerId}`;
+    
+    // Check current ICE queue length
+    const currentLength = await kv.llen(iceKey) || 0;
+    if (currentLength >= MAX_ICE_CANDIDATES) {
+      // Remove oldest candidate to make room
+      await kv.rpop(iceKey);
+    }
+    
+    // Add new ICE candidate
+    await kv.lpush(iceKey, JSON.stringify({
+      candidate,
+      timestamp: Date.now(),
+      from: userId
+    }));
+    await kv.expire(iceKey, MATCH_TIMEOUT);
+    
+    serverStats.totalICE++;
+    
+    return res.json({
+      status: 'sent',
+      partnerId,
+      queueLength: Math.min(currentLength + 1, MAX_ICE_CANDIDATES),
+      timestamp: Date.now()
+    });
+    
+  } catch (error) {
+    console.error('[SEND_ICE] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to send ICE candidate',
+      details: error.message 
+    });
+  }
+}
+
+// Get ICE candidates
+async function handleGetICE(userId, data, res) {
+  try {
+    const { matchId } = data;
+    
+    if (!matchId) {
+      return res.status(400).json({ error: 'Missing matchId' });
+    }
+    
+    const iceKey = `ice:${matchId}:${userId}`;
+    const candidates = await kv.lrange(iceKey, 0, -1);
+    
+    if (!candidates || candidates.length === 0) {
+      return res.json({
+        status: 'no_candidates',
+        candidates: [],
+        count: 0
+      });
+    }
+    
+    // Parse candidates
+    const parsedCandidates = candidates.map(candidate => {
+      try {
+        return JSON.parse(candidate);
+      } catch (e) {
+        return { candidate, timestamp: Date.now(), from: 'unknown' };
+      }
+    });
+    
+    // Clear ICE candidates after reading
+    await kv.del(iceKey);
+    
+    return res.json({
+      status: 'received',
+      candidates: parsedCandidates,
+      count: parsedCandidates.length
+    });
+    
+  } catch (error) {
+    console.error('[GET_ICE] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to get ICE candidates',
+      details: error.message 
+    });
+  }
+}
+
+// Mark connection as ready
+async function handleConnectionReady(userId, data, res) {
+  try {
+    const { matchId } = data;
+    
+    if (!matchId) {
+      return res.status(400).json({ error: 'Missing matchId' });
+    }
+    
+    // Update match status
+    await kv.hset(`matches:${matchId}`, {
+      status: 'connected',
+      connectedAt: Date.now().toString()
+    });
+    
+    // Cleanup signaling data
+    const matchData = await kv.hgetall(`matches:${matchId}`);
+    if (matchData) {
+      const partnerId = matchData.p1 === userId ? matchData.p2 : matchData.p1;
+      
+      // Clean up signaling and ICE data
+      await Promise.all([
+        kv.del(`signals:${matchId}:${userId}`),
+        kv.del(`signals:${matchId}:${partnerId}`),
+        kv.del(`ice:${matchId}:${userId}`),
+        kv.del(`ice:${matchId}:${partnerId}`)
+      ]);
+    }
+    
+    return res.json({
+      status: 'connected',
+      message: 'Connection established and signaling data cleaned up',
+      timestamp: Date.now()
+    });
+    
+  } catch (error) {
+    console.error('[CONNECTION_READY] Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to mark connection ready',
+      details: error.message 
+    });
+  }
+}
+
+// Disconnect user
 async function handleDisconnect(userId, res) {
   try {
+    // Get user data
     const userData = await kv.hgetall(`users:${userId}`);
     let cleanupResults = {
       userRemoved: false,
@@ -347,6 +610,10 @@ async function handleDisconnect(userId, res) {
         // Clean up match and related data
         await Promise.all([
           kv.del(`matches:${userData.matchId}`),
+          kv.del(`signals:${userData.matchId}:${userId}`),
+          kv.del(`signals:${userData.matchId}:${partnerId}`),
+          kv.del(`ice:${userData.matchId}:${userId}`),
+          kv.del(`ice:${userData.matchId}:${partnerId}`),
           kv.del(`users:${partnerId}`)
         ]);
         
@@ -371,7 +638,8 @@ async function handleDisconnect(userId, res) {
     return res.json({
       status: 'disconnected',
       cleanup: cleanupResults,
-      message: 'Successfully disconnected and cleaned up all data'
+      message: 'Successfully disconnected and cleaned up all data',
+      timestamp: Date.now()
     });
     
   } catch (error) {
@@ -448,6 +716,7 @@ export async function performBackgroundCleanup() {
     return { 
       success: true, 
       timestamp,
+      stats: serverStats,
       message: 'TTL-based cleanup active. Manual cleanup completed.' 
     };
   } catch (error) {
