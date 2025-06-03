@@ -27,13 +27,6 @@ let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo, chatZo
 let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
 
-// Smart logging function
-function smartLog(level, ...args) {
-    if (ENABLE_DETAILED_LOGGING) {
-        console.log(`[${level}]`, ...args);
-    }
-}
-
 // Critical logs always show (errors, matches, etc.)
 function criticalLog(level, ...args) {
     console.log(`[${level}]`, ...args);
@@ -157,13 +150,13 @@ export default async function handler(req) {
         // Parse request body
         const data = await req.json();
         
-        const { action, userId, chatZone, gender } = data;
+        const { action, userId, chatZone } = data;
         
         if (!userId) {
             return createCorsResponse({ error: 'userId is required' }, 400);
         }
         
-        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId} (ChatZone: ${chatZone || 'N/A'}, Gender: ${gender || 'N/A'})`);
+        criticalLog(`${action?.toUpperCase() || 'UNKNOWN'}`, `${userId} (ChatZone: ${chatZone || 'N/A'})`);
         
         switch (action) {
             case 'instant-match': 
@@ -171,7 +164,9 @@ export default async function handler(req) {
             case 'get-signals': 
                 return handleGetSignals(userId, data);
             case 'send-signal': 
-                return handleSendSignal(userId, data);
+                return handleSendSignal(userId, data);                
+            case 'p2p-connected': 
+                return handleP2Pconnected(userId, data);      
             case 'disconnect': 
                 return handleDisconnect(userId);
             default: 
@@ -889,7 +884,7 @@ export default async function handler(req) {
         // Parse request body
         const data = await req.json();
         
-        const { action, userId, chatZone } = data;
+                const { action, userId, chatZone } = data;
         
         if (!userId) {
             return createCorsResponse({ error: 'userId is required' }, 400);
@@ -990,7 +985,7 @@ function calculateGenderScore(userGender, partnerGender) {
 // ==========================================
 
 function handleInstantMatch(userId, data) {
-    const { userInfo, preferredMatchId, chatZone } = data;
+    const { userInfo, preferredMatchId, chatZone, gender } = data;
     
     smartLog('INSTANT-MATCH', `${userId} looking for partner (ChatZone: ${chatZone})`);
     
@@ -1034,7 +1029,7 @@ function handleInstantMatch(userId, data) {
         
         // 👫 GENDER MATCHING (Formula-based)
         if (userInfo && waitingUser.userInfo) {
-            const userGender = userInfo.gender || 'Unspecified';
+            const userGender = gender || userInfo?.gender || 'Unspecified';
             const partnerGender = waitingUser.userInfo.gender || 'Unspecified';
             
             const genderScore = calculateGenderScore(userGender, partnerGender);
@@ -1124,7 +1119,7 @@ function handleInstantMatch(userId, data) {
                 : '';
                 
             const genderInfo = userInfo && partnerUser.userInfo 
-                ? ` | Gender: ${userInfo.gender || 'N/A'} <-> ${partnerUser.userInfo.gender || 'N/A'} (score: ${bestMatchDetails.scoreBreakdown?.gender || 0})`
+                ? ` | Gender: ${gender || userInfo.gender || 'N/A'} <-> ${partnerUser.userInfo.gender || 'N/A'} (score: ${bestMatchDetails.scoreBreakdown?.gender || 0})`
                 : '';
             
             criticalLog('INSTANT-MATCH', `🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'} | Score: ${bestMatchScore}${timezoneInfo}${genderInfo}`);
@@ -1182,7 +1177,7 @@ function handleInstantMatch(userId, data) {
                     let genderScore = 0;
                     if (userInfo && waitingUserData.userInfo) {
                         genderScore = calculateGenderScore(
-                            userInfo.gender || 'Unspecified', 
+                           gender|| userInfo.gender || 'Unspecified', 
                             waitingUserData.userInfo.gender || 'Unspecified'
                         );
                     }
@@ -1601,6 +1596,7 @@ export default async function handler(req) {
         const data = await req.json();
         
         const { action, userId, chatZone } = data;
+
         
         if (!userId) {
             return createCorsResponse({ error: 'userId is required' }, 400);
@@ -1784,7 +1780,7 @@ function handleInstantMatch(userId, data) {
         
         // 👫 NEW GENDER MATCHING (Formula-based)
         if (userInfo && waitingUser.userInfo) {
-            const userGender = userInfo.gender || 'Unspecified';
+            const userGender = gender || userInfo.gender || 'Unspecified';
             const partnerGender = waitingUser.userInfo.gender || 'Unspecified';
             
             const genderScore = calculateGenderScore(userGender, partnerGender);
@@ -1922,7 +1918,7 @@ function handleInstantMatch(userId, data) {
                 let genderScore = 0;
                 if (userInfo && waitingUserData.userInfo) {
                     genderScore = calculateGenderScore(
-                        userInfo.gender || 'Unspecified', 
+                        gender || userInfo.gender || 'Unspecified', 
                         waitingUserData.userInfo.gender || 'Unspecified'
                     );
                 }
@@ -1946,7 +1942,7 @@ function handleInstantMatch(userId, data) {
             position,
             waitingUsers: waitingUsers.size,
             chatZone: chatZone,
-            userGender: userInfo?.gender || 'Unspecified',
+            userGender: gender || userInfo?.gender || 'Unspecified',
             potentialMatches: potentialMatches.slice(0, 5), // Top 5 potential matches
             message: 'Added to matching queue. Waiting for partner...',
             estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
@@ -3050,6 +3046,33 @@ function handleSendSignal(userId, data) {
         partnerId,
         signalType: type,
         queueLength: match.signals[partnerId].length,
+        timestamp: Date.now()
+    });
+}
+function handleP2Pconnected(userId, data) {
+    const { matchId, partnerId } = data;
+    console.log(`[P2PConnected] ${matchId}`);
+    
+    let removed = false;
+    
+    // Remove from waiting list
+    if (waitingUsers.has(userId)) {
+        const user = waitingUsers.get(userId);
+        waitingUsers.delete(userId);
+        removed = true;
+        console.log(`[DISCONNECT] Removed ${userId} from waiting list`);
+    }
+    if (waitingUsers.has(partnerId)) {
+        const user = waitingUsers.get(partnerId);
+        waitingUsers.delete(partnerId);
+        removed = true;
+        console.log(`[DISCONNECT] Removed ${partnerId} from waiting list`);
+    }
+    activeMatches.delete(matchId);      
+    
+    return createCorsResponse({ 
+        status: 'p2p_connected',
+        removed,
         timestamp: Date.now()
     });
 }
