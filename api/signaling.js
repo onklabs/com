@@ -259,7 +259,7 @@ function calculateGenderScore(userGender, partnerGender) {
 // ==========================================
 
 function handleInstantMatch(userId, data) {
-    const { userInfo, preferredMatchId, chatZone } = data;
+    const { userInfo, preferredMatchId, chatZone, gender } = data;
     
     smartLog('INSTANT-MATCH', `${userId} looking for partner (ChatZone: ${chatZone})`);
     
@@ -300,7 +300,7 @@ function handleInstantMatch(userId, data) {
         
         // 👫 GENDER MATCHING (Formula-based)
         if (userInfo && waitingUser.userInfo) {
-            const userGender = userInfo.gender || 'Unspecified';
+            const userGender = gender|| userInfo.gender || 'Unspecified';
             const partnerGender = waitingUser.userInfo.gender || 'Unspecified';
             
             const genderScore = calculateGenderScore(userGender, partnerGender);
@@ -390,7 +390,7 @@ function handleInstantMatch(userId, data) {
                 : '';
                 
             const genderInfo = userInfo && partnerUser.userInfo 
-                ? ` | Gender: ${userInfo.gender || 'N/A'} <-> ${partnerUser.userInfo.gender || 'N/A'} (score: ${bestMatchDetails.scoreBreakdown?.gender || 0})`
+                ? ` | Gender: ${gender || userInfo.gender || 'N/A'} <-> ${partnerUser.userInfo.gender || 'N/A'} (score: ${bestMatchDetails.scoreBreakdown?.gender || 0})`
                 : '';
             
             criticalLog('INSTANT-MATCH', `🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'} | Score: ${bestMatchScore}${timezoneInfo}${genderInfo}`);
@@ -448,7 +448,7 @@ function handleInstantMatch(userId, data) {
                     let genderScore = 0;
                     if (userInfo && waitingUserData.userInfo) {
                         genderScore = calculateGenderScore(
-                            userInfo.gender || 'Unspecified', 
+                            gender || userInfo.gender || 'Unspecified', 
                             waitingUserData.userInfo.gender || 'Unspecified'
                         );
                     }
