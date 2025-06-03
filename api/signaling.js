@@ -1,937 +1,419 @@
-// Optimized signaling server without Redis - using enhanced in-memory storage
-// WARNING: Data will be lost on server restart
-export const maxDuration = 60; // 30 seconds for Pro plan
+// WebRTC Signaling Server - Standard Offer/Answer Exchange
+// Synchronized with fixed client that generates fresh signals
 
-// Enhanced in-memory storage with automatic cleanup
-let waitingQueue = [];
-let matches = new Map();
-let userMatches = new Map();
-let heartbeats = new Map();
-let cleanupIntervals = new Map();
+let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo }
+let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
-const TIMEOUTS = {
-  WAITING: 45000,        // 45s in queue
-  MATCH: 90000,         // 1.5 minutes match lifetime (changed from 400000)
-  HEARTBEAT: 90000,      // 1.5 minutes heartbeat
-  SIGNAL: 45000,         // 45s for signals
-  CLEANUP_INTERVAL: 90000 // Clean up every 1.5 minutes
-};
-
-// Enhanced cleanup system
-function startPeriodicCleanup() {
-  if (!cleanupIntervals.has('main')) {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      
-      // Clean expired heartbeats
-      for (const [userId, timestamp] of heartbeats.entries()) {
-        if (now - timestamp > TIMEOUTS.HEARTBEAT) {
-          heartbeats.delete(userId);
-          console.log(`[CLEANUP] Removed expired heartbeat for ${userId}`);
-        }
-      }
-      
-      // Clean expired matches
-      for (const [matchId, match] of matches.entries()) {
-        if (now - match.ts > TIMEOUTS.MATCH) {
-          matches.delete(matchId);
-          userMatches.delete(match.p1);
-          userMatches.delete(match.p2);
-          console.log(`[CLEANUP] Removed expired match ${matchId}`);
-        }
-      }
-      
-      // Clean waiting queue
-      const beforeCount = waitingQueue.length;
-      waitingQueue = waitingQueue.filter(p => now - p.ts < TIMEOUTS.WAITING);
-      if (waitingQueue.length !== beforeCount) {
-        console.log(`[CLEANUP] Cleaned waiting queue: ${beforeCount} -> ${waitingQueue.length}`);
-      }
-      
-    }, TIMEOUTS.CLEANUP_INTERVAL);
-    
-    cleanupIntervals.set('main', interval);
-    console.log('[CLEANUP] Periodic cleanup started');
-  }
-}
-
-// NEW: Function to clean expired matches on every request
-function cleanExpiredMatches() {
-  const now = Date.now();
-  let cleanedCount = 0;
-  const expiredMatches = [];
-  
-  // Find all expired matches
-  for (const [matchId, match] of matches.entries()) {
-    const matchAge = now - match.ts;
-    if (matchAge > TIMEOUTS.MATCH) {
-      expiredMatches.push({ matchId, match, age: matchAge });
-    }
-  }
-  
-  // Remove expired matches
-  for (const { matchId, match, age } of expiredMatches) {
-    matches.delete(matchId);
-    userMatches.delete(match.p1);
-    userMatches.delete(match.p2);
-    cleanedCount++;
-    console.log(`[REQUEST_CLEANUP] Removed expired match ${matchId} (age: ${Math.floor(age/1000)}s) - users: ${match.p1}, ${match.p2}`);
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`[REQUEST_CLEANUP] Cleaned ${cleanedCount} expired matches from ${matches.size + cleanedCount} total matches`);
-  }
-  
-  return cleanedCount;
-}
-
-// Start cleanup when module loads
-startPeriodicCleanup();
+const USER_TIMEOUT = 120000; // 2 minutes for waiting users
+const MATCH_LIFETIME = 600000; // 10 minutes for active matches
+const MAX_WAITING_USERS = 1000; // Prevent memory bloat
 
 export default async function handler(req, res) {
-  console.log('=== Enhanced Signaling API Called ===');
-  console.log('Method:', req.method);
-  console.log('Query keys:', Object.keys(req.query));
-  console.log('Body:', req.body);
-  
-  // NEW: Clean expired matches on every request
-  const cleanedMatches = cleanExpiredMatches();
-  
-  // FIXED: Enhanced CORS headers with all necessary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 
-    'Content-Type, X-Requested-With, Authorization, Accept, Origin, Cache-Control, X-File-Name, X-File-Size, X-File-Type'
-  );
-  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
-  res.setHeader('Access-Control-Allow-Credentials', 'false');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    console.log('[CORS] Handling preflight request');
     return res.status(200).end();
   }
   
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    return res.status(405).json({ 
-      status: 'error', 
-      message: 'Only GET and POST methods allowed',
-      allowed_methods: ['GET', 'POST', 'OPTIONS']
+  // GET: Health check and debug info
+  if (req.method === 'GET') {
+    const { debug } = req.query;
+    
+    if (debug === 'true') {
+      return res.json({
+        status: 'webrtc-signaling-server',
+        stats: {
+          waitingUsers: waitingUsers.size,
+          activeMatches: activeMatches.size,
+          totalUsers: waitingUsers.size + (activeMatches.size * 2)
+        },
+        waitingUserIds: Array.from(waitingUsers.keys()),
+        activeMatchIds: Array.from(activeMatches.keys()),
+        timestamp: Date.now()
+      });
+    }
+    
+    // Trigger cleanup
+    cleanup();
+    
+    return res.json({ 
+      status: 'signaling-ready',
+      stats: { 
+        waiting: waitingUsers.size, 
+        matches: activeMatches.size
+      },
+      message: 'WebRTC signaling server ready for connections',
+      timestamp: Date.now()
     });
   }
   
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'POST required for signaling' });
+  }
+  
   try {
-    // Support both GET (query params) and POST (body)
-    let requestData = {};
+    // Parse request body
+    let data;
+    if (typeof req.body === 'string') {
+      data = JSON.parse(req.body);
+    } else {
+      data = req.body;
+    }
     
-    if (req.method === 'GET') {
-      requestData = req.query;
-    } else if (req.method === 'POST') {
-      // Handle both JSON body and query params
-      requestData = { ...req.query, ...req.body };
-      
-      // Convert client 'type' to server 'action'
-      if (requestData.type && !requestData.action) {
-        requestData.action = requestData.type;
-        delete requestData.type;
+    const { action, userId } = data;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    console.log(`[${action?.toUpperCase() || 'UNKNOWN'}] ${userId}`);
+    
+    switch (action) {
+      case 'instant-match': 
+        return handleInstantMatch(userId, data, res);
+      case 'get-signals': 
+        return handleGetSignals(userId, res);
+      case 'send-signal': 
+        return handleSendSignal(userId, data, res);
+      case 'disconnect': 
+        return handleDisconnect(userId, res);
+      default: 
+        return res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+  } catch (error) {
+    console.error('[SERVER ERROR]', error);
+    return res.status(500).json({ error: 'Server error', details: error.message });
+  }
+}
+
+// ==========================================
+// INSTANT MATCH HANDLER (SIMPLIFIED)
+// ==========================================
+
+function handleInstantMatch(userId, data, res) {
+  const { userInfo, preferredMatchId } = data;
+  
+  console.log(`[INSTANT-MATCH] ${userId} looking for partner`);
+  
+  // Cleanup first
+  cleanup();
+  
+  // Check if user is already waiting or matched
+  if (waitingUsers.has(userId)) {
+    waitingUsers.delete(userId);
+    console.log(`[INSTANT-MATCH] Updated existing user ${userId}`);
+  }
+  
+  // Remove user from any existing matches
+  for (const [matchId, match] of activeMatches.entries()) {
+    if (match.p1 === userId || match.p2 === userId) {
+      console.log(`[INSTANT-MATCH] Removing ${userId} from existing match ${matchId}`);
+      activeMatches.delete(matchId);
+      break;
+    }
+  }
+  
+  // Try to find instant match from waiting users
+  let bestMatch = null;
+  let bestMatchScore = 0;
+  
+  for (const [waitingUserId, waitingUser] of waitingUsers.entries()) {
+    if (waitingUserId === userId) continue;
+    
+    // Calculate compatibility score
+    let score = 1;
+    
+    // Prefer users with complementary userInfo if available
+    if (userInfo && waitingUser.userInfo) {
+      if (userInfo.gender && waitingUser.userInfo.gender && 
+          userInfo.gender !== waitingUser.userInfo.gender && 
+          userInfo.gender !== 'Unspecified' && waitingUser.userInfo.gender !== 'Unspecified') {
+        score += 2; // Bonus for different genders
+      }
+      if (userInfo.status && waitingUser.userInfo.status &&
+          userInfo.status === waitingUser.userInfo.status) {
+        score += 1; // Bonus for similar status/mood
       }
     }
     
-    console.log('[DEBUG] Parsed request data:', JSON.stringify(requestData, null, 2));
+    // Prefer newer users (less waiting time)
+    const waitTime = Date.now() - waitingUser.timestamp;
+    if (waitTime < 30000) score += 1; // Less than 30 seconds
+    if (waitTime < 10000) score += 1; // Less than 10 seconds (very fresh)
     
-    const { action, userId, ...params } = requestData;
-    const now = Date.now();
-    
-    // Enhanced validation logging
-    if (!action) {
-      console.log('[DEBUG] No action provided, returning health check');
-    } else if (!userId) {
-      console.log('[DEBUG] Missing userId for action:', action);
-    } else if (typeof userId !== 'string' || userId.length < 3) {
-      console.log('[DEBUG] Invalid userId format:', userId, typeof userId);
+    if (score > bestMatchScore) {
+      bestMatchScore = score;
+      bestMatch = { userId: waitingUserId, user: waitingUser };
     }
+  }
+  
+  if (bestMatch) {
+    // INSTANT MATCH FOUND! 🚀
+    const partnerId = bestMatch.userId;
+    const partnerUser = bestMatch.user;
     
-    // Enhanced health check with detailed stats including cleanup info
-    if (!action) {
-      const stats = {
-        waiting: waitingQueue.length,
-        active_matches: matches.size,
-        active_users: heartbeats.size,
-        matches_cleaned_this_request: cleanedMatches,
-        match_timeout_minutes: TIMEOUTS.MATCH / 60000,
-        server_uptime: process.uptime ? Math.floor(process.uptime()) : 'unknown',
-        memory_usage: process.memoryUsage ? process.memoryUsage() : 'unknown'
-      };
-      
-      return res.status(200).json({
-        service: 'Enhanced WebRTC Signaling',
-        status: 'online',
-        timestamp: now,
-        stats: stats,
-        version: '2.2.0',
-        cors_fixed: true,
-        cleanup_enabled: true
-      });
-    }
+    // Remove partner from waiting list
+    waitingUsers.delete(partnerId);
     
-    // Validate userId
-    if (!userId || typeof userId !== 'string' || userId.length < 3) {
-      console.log('[ERROR] Invalid userId validation failed:', {
-        userId: userId,
-        type: typeof userId,
-        length: userId ? userId.length : 0
-      });
-      
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Invalid or missing userId parameter',
-        expected_format: 'string with minimum 3 characters',
-        received: {
-          userId: userId,
-          type: typeof userId,
-          length: userId ? userId.length : 0
-        }
-      });
-    }
-
-    console.log(`[${action?.toUpperCase()}] Processing for user: ${userId}`);
-    updateHeartbeat(userId, now);
-
-    let result;
-    switch (action) {
-      case 'find-match':
-        result = await handleFindMatch({ userId, ...params }, now);
-        break;
-      case 'exchange-signals':
-        result = await handleExchangeSignals({ userId, ...params }, now);
-        break;
-      case 'heartbeat':
-        result = await handleHeartbeat({ userId, ...params }, now);
-        break;
-      case 'disconnect':
-        result = await handleDisconnect({ userId, ...params });
-        break;
-      case 'cleanup-match':
-        const matchId = params.matchId;
-        const reason = params.reason || 'unknown';
-        
-        console.log(`[CLEANUP] Match ${matchId} cleanup requested: ${reason}`);
-        
-        const deleted = deleteMatch(matchId);
-        result = {
-          status: 'success',
-          message: deleted ? 'Match deleted' : 'Match already deleted',
-          cleaned: deleted,
-          reason: reason
-        };
-        break;
-      default:
-        result = { 
-          status: 'error', 
-          message: `Unknown action: ${action}`,
-          available_actions: ['find-match', 'exchange-signals', 'heartbeat', 'disconnect', 'cleanup-match']
-        };
-    }
+    // Create match
+    const matchId = preferredMatchId || `match_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     
-    console.log(`[${action?.toUpperCase()}] Result: ${result.status}`);
-    return res.status(result.status === 'error' ? 400 : 200).json(result);
+    // Determine who is initiator (consistent ordering)
+    const isUserInitiator = userId < partnerId;
+    const p1 = isUserInitiator ? userId : partnerId;
+    const p2 = isUserInitiator ? partnerId : userId;
     
-  } catch (error) {
-    console.error('[ERROR] Server error:', error.message);
-    console.error('[ERROR] Stack:', error.stack);
-    console.error('[ERROR] Request method:', req.method);
-    console.error('[ERROR] Request query:', req.query);
-    console.error('[ERROR] Request body:', req.body);
-    
-    return res.status(500).json({ 
-      status: 'error', 
-      message: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-      debug_info: {
-        method: req.method,
-        has_query: !!req.query,
-        has_body: !!req.body,
-        query_keys: req.query ? Object.keys(req.query) : [],
-        body_keys: req.body ? Object.keys(req.body) : []
+    // Create match without pre-exchanged signals
+    const match = {
+      p1,
+      p2,
+      timestamp: Date.now(),
+      signals: {
+        [p1]: [], // Initiator's signal queue
+        [p2]: []  // Receiver's signal queue
       },
+      userInfo: {
+        [userId]: userInfo || {},
+        [partnerId]: partnerUser.userInfo || {}
+      }
+    };
+    
+    activeMatches.set(matchId, match);
+    
+    console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'}`);
+    
+    return res.json({
+      status: 'instant-match',
+      matchId,
+      partnerId,
+      isInitiator: isUserInitiator,
+      partnerInfo: partnerUser.userInfo || {},
+      signals: [], // No pre-exchanged signals
+      compatibility: bestMatchScore,
+      message: 'Instant match found! WebRTC connection will be established.',
+      timestamp: Date.now()
+    });
+    
+  } else {
+    // No immediate match, add to waiting list
+    const waitingUser = {
+      userId,
+      userInfo: userInfo || {},
+      timestamp: Date.now()
+    };
+    
+    waitingUsers.set(userId, waitingUser);
+    
+    const position = waitingUsers.size;
+    console.log(`[INSTANT-MATCH] ${userId} added to waiting list (position ${position})`);
+    
+    return res.json({
+      status: 'waiting',
+      position,
+      waitingUsers: waitingUsers.size,
+      message: 'Added to matching queue. Waiting for partner...',
+      estimatedWaitTime: Math.min(waitingUsers.size * 2, 30),
       timestamp: Date.now()
     });
   }
 }
 
-// Enhanced helper functions with better error handling and logging
+// ==========================================
+// SIGNAL HANDLERS
+// ==========================================
 
-function updateHeartbeat(userId, timestamp) {
-  const previous = heartbeats.get(userId);
-  heartbeats.set(userId, timestamp);
-  
-  if (!previous) {
-    console.log(`[HEARTBEAT] New user: ${userId}`);
-  }
-}
-
-function getMatch(matchId) {
-  if (!matchId) return null;
-  const match = matches.get(matchId);
-  
-  // Check if match is expired (this check is now redundant since we clean on every request)
-  if (match && Date.now() - match.ts > TIMEOUTS.MATCH) {
-    deleteMatch(matchId);
-    console.log(`[MATCH] Auto-deleted expired match: ${matchId}`);
-    return null;
-  }
-  
-  return match;
-}
-
-function setMatch(matchId, matchData) {
-  matches.set(matchId, matchData);
-  console.log(`[MATCH] Created match: ${matchId} (${matchData.p1} <-> ${matchData.p2}) - expires in ${TIMEOUTS.MATCH/60000} minutes`);
-}
-
-function getUserMatch(userId) {
-  const matchId = userMatches.get(userId);
-  if (!matchId) return null;
-  
-  // Verify match still exists
-  const match = getMatch(matchId);
-  if (!match) {
-    deleteUserMatch(userId);
-    return null;
-  }
-  
-  return matchId;
-}
-
-function setUserMatch(userId, matchId) {
-  userMatches.set(userId, matchId);
-  console.log(`[USER_MATCH] Set ${userId} -> ${matchId}`);
-}
-
-function deleteUserMatch(userId) {
-  const removed = userMatches.delete(userId);
-  if (removed) {
-    console.log(`[USER_MATCH] Deleted mapping for ${userId}`);
-  }
-  return removed;
-}
-
-function deleteMatch(matchId) {
-  const match = matches.get(matchId);
-  if (match) {
-    matches.delete(matchId);
-    // Also clean up user mappings
-    deleteUserMatch(match.p1);
-    deleteUserMatch(match.p2);
-    console.log(`[MATCH] Deleted match: ${matchId}`);
-    return true;
-  }
-  return false;
-}
-
-function getWaitingQueue() {
-  // Enhanced cleanup with logging
-  const now = Date.now();
-  const beforeCount = waitingQueue.length;
-  waitingQueue = waitingQueue.filter(p => {
-    const isValid = now - p.ts < TIMEOUTS.WAITING;
-    if (!isValid) {
-      console.log(`[QUEUE] Removed expired user from queue: ${p.id}`);
-    }
-    return isValid;
-  });
-  
-  if (beforeCount !== waitingQueue.length) {
-    console.log(`[QUEUE] Cleaned queue: ${beforeCount} -> ${waitingQueue.length}`);
-  }
-  
-  return waitingQueue;
-}
-
-function setWaitingQueue(queue) {
-  const previous = waitingQueue.length;
-  waitingQueue = queue;
-  console.log(`[QUEUE] Updated queue size: ${previous} -> ${queue.length}`);
-}
-
-function deterministic_initiator(peer1, peer2) {
-  return peer1.localeCompare(peer2) < 0;
-}
-
-function createLightweightMatch(peer1, peer2, now) {
-  return {
-    p1: peer1,
-    p2: peer2,
-    ts: now,
-    st: 'signaling',
-    to: {
-      o: now + 35000,  // 35s for offer (compromise)
-      a: now + 35000,  // 35s for answer (compromise)
-      c: now + 120000  // 2 minutes for connection
-    },
-    s: {
-      [peer1]: { o: [], a: [], i: [], k: [] },
-      [peer2]: { o: [], a: [], i: [], k: [] }
-    }
-  };
-}
-
-function expandMatch(match) {
-  if (!match) return null;
-  
-  return {
-    id: match.id,
-    peer1: match.p1,
-    peer2: match.p2,
-    timestamp: match.ts,
-    status: match.st,
-    timeouts: {
-      offer: match.to.o,
-      answer: match.to.a,
-      connection: match.to.c
-    },
-    signaling: {
-      [match.p1]: {
-        offers: match.s[match.p1]?.o || [],
-        answers: match.s[match.p1]?.a || [],
-        ice: match.s[match.p1]?.i || [],
-        acks: match.s[match.p1]?.k || []
-      },
-      [match.p2]: {
-        offers: match.s[match.p2]?.o || [],
-        answers: match.s[match.p2]?.a || [],
-        ice: match.s[match.p2]?.i || [],
-        acks: match.s[match.p2]?.k || []
-      }
-    }
-  };
-}
-
-function compressMatch(match) {
-  if (!match) return null;
-  
-  return {
-    p1: match.peer1,
-    p2: match.peer2,
-    ts: match.timestamp,
-    st: match.status,
-    to: {
-      o: match.timeouts.offer,
-      a: match.timeouts.answer,
-      c: match.timeouts.connection
-    },
-    s: {
-      [match.peer1]: {
-        o: match.signaling[match.peer1]?.offers || [],
-        a: match.signaling[match.peer1]?.answers || [],
-        i: match.signaling[match.peer1]?.ice || [],
-        k: match.signaling[match.peer1]?.acks || []
-      },
-      [match.peer2]: {
-        o: match.signaling[match.peer2]?.offers || [],
-        a: match.signaling[match.peer2]?.answers || [],
-        i: match.signaling[match.peer2]?.ice || [],
-        k: match.signaling[match.peer2]?.acks || []
-      }
-    }
-  };
-}
-
-async function validateMatch(matchId, peerId) {
-  console.log(`[VALIDATE] Checking match ${matchId} for user ${peerId}`);
-  
-  if (!matchId || !peerId) {
-    console.log(`[VALIDATE] Missing parameters: matchId=${matchId}, peerId=${peerId}`);
-    return { valid: false, error: 'Missing matchId or peerId' };
-  }
-  
-  const match = getMatch(matchId);
-  if (!match) {
-    console.log(`[VALIDATE] Match not found: ${matchId}`);
-    console.log(`[VALIDATE] Available matches:`, Array.from(matches.keys()));
-    return { valid: false, error: 'Match not found' };
-  }
-  
-  if (match.p1 !== peerId && match.p2 !== peerId) {
-    console.log(`[VALIDATE] Unauthorized access to match ${matchId} by ${peerId}`);
-    console.log(`[VALIDATE] Match participants: ${match.p1}, ${match.p2}`);
-    return { valid: false, error: 'Unauthorized' };
-  }
-  
-  const now = Date.now();
-  const matchAge = now - match.ts;
-  console.log(`[VALIDATE] Match age: ${matchAge}ms, timeout: ${TIMEOUTS.MATCH}ms`);
-  
-  if (matchAge > TIMEOUTS.MATCH) {
-    console.log(`[VALIDATE] Match expired: ${matchId} (age: ${matchAge}ms)`);
-    deleteMatch(matchId);
-    return { valid: false, error: 'Match expired' };
-  }
-  
-  console.log(`[VALIDATE] Match valid: ${matchId}`);
-  return { valid: true, match: expandMatch(match) };
-}
-
-async function cleanExpiredSignals(match, now) {
-  if (!match) return null;
-  
-  const cleaned = { ...match };
-  let totalCleaned = 0;
-  
-  for (const peerId of [match.peer1, match.peer2]) {
-    const signals = cleaned.signaling[peerId];
-    if (!signals) continue;
-    
-    const beforeOffers = signals.offers.length;
-    const beforeAnswers = signals.answers.length;
-    const beforeIce = signals.ice.length;
-    const beforeAcks = signals.acks.length;
-    
-    signals.offers = signals.offers.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
-    signals.answers = signals.answers.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
-    signals.ice = signals.ice.filter(s => now - s.ts < 20000);
-    signals.acks = signals.acks.filter(s => now - s.ts < TIMEOUTS.SIGNAL);
-    
-    const cleaned_count = (beforeOffers - signals.offers.length) + 
-                         (beforeAnswers - signals.answers.length) + 
-                         (beforeIce - signals.ice.length) + 
-                         (beforeAcks - signals.acks.length);
-    
-    totalCleaned += cleaned_count;
-  }
-  
-  if (totalCleaned > 0) {
-    console.log(`[SIGNALS] Cleaned ${totalCleaned} expired signals from match`);
-  }
-  
-  return cleaned;
-}
-
-async function handleFindMatch(data, now) {
-  console.log(`[FIND_MATCH] Starting for user ${data.userId}`);
-  
-  // Check for existing match first
-  const existingMatchId = getUserMatch(data.userId);
-  if (existingMatchId) {
-    const existingMatch = getMatch(existingMatchId);
-    if (existingMatch) {
-      const expanded = expandMatch(existingMatch);
-      const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
+function handleGetSignals(userId, res) {
+  // Find user's match
+  for (const [matchId, match] of activeMatches.entries()) {
+    if (match.p1 === userId || match.p2 === userId) {
+      const partnerId = match.p1 === userId ? match.p2 : match.p1;
+      const signals = match.signals[userId] || [];
       
-      // Reset match status to allow reconnection (moderate timeouts)
-      existingMatch.st = 'signaling';
-      existingMatch.to = {
-        o: now + 35000,
-        a: now + 35000, 
-        c: now + 120000
-      };
+      // Clear signals after reading to prevent duplicates
+      match.signals[userId] = [];
       
-      setMatch(existingMatchId, existingMatch);
+      console.log(`[GET-SIGNALS] ${userId} -> ${signals.length} signals from match ${matchId}`);
       
-      console.log(`[FIND_MATCH] Found existing match: ${existingMatchId}, reset for reconnection`);
-      
-      return {
+      return res.json({
         status: 'matched',
-        matchId: existingMatchId,
-        partnerId: partnerId,
-        isInitiator: deterministic_initiator(data.userId, partnerId),
-        existing: true,
-        reconnecting: true,
-        timestamp: now
-      };
-    } else {
-      deleteUserMatch(data.userId);
-      console.log(`[FIND_MATCH] Cleaned stale user match for ${data.userId}`);
+        matchId,
+        partnerId,
+        isInitiator: match.p1 === userId,
+        signals,
+        timestamp: Date.now()
+      });
     }
   }
   
-  // Get current queue and remove current user if present
-  let queue = getWaitingQueue();
-  queue = queue.filter(p => p.id !== data.userId);
+  // Check if still in waiting list
+  if (waitingUsers.has(userId)) {
+    const position = Array.from(waitingUsers.keys()).indexOf(userId) + 1;
+    return res.json({
+      status: 'waiting',
+      position,
+      waitingUsers: waitingUsers.size,
+      timestamp: Date.now()
+    });
+  }
   
-  // Enhanced matching logic with timezone preference
-  const timezone = parseFloat(data.timezone) || 0;
-  const compatiblePeer = queue.find(p => {
-    if (!timezone && !p.tz) return true; // Both have no timezone preference
-    if (!timezone || !p.tz) return true; // One has no preference, allow match
-    return Math.abs(p.tz - timezone) <= 12; // Within 12 hours
+  return res.json({
+    status: 'not_found',
+    message: 'User not found in waiting list or active matches',
+    timestamp: Date.now()
   });
+}
+
+function handleSendSignal(userId, data, res) {
+  const { matchId, type, payload } = data;
   
-  if (compatiblePeer) {
-    // Create match with deterministic initiator
-    const peer1 = deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id;
-    const peer2 = peer1 === data.userId ? compatiblePeer.id : data.userId;
-    
-    const matchId = `m_${now}_${Math.random().toString(36).substr(2, 8)}`;
-    const matchInfo = createLightweightMatch(peer1, peer2, now);
-    
-    // DEBUG: Log match creation details
-    console.log(`[MATCH_CREATE] Creating match ${matchId} - will expire in ${TIMEOUTS.MATCH/60000} minutes`);
-    console.log(`[MATCH_CREATE] Peer1: ${peer1}, Peer2: ${peer2}`);
-    console.log(`[MATCH_CREATE] Initiator: ${deterministic_initiator(data.userId, compatiblePeer.id) ? data.userId : compatiblePeer.id}`);
-    console.log(`[MATCH_CREATE] Match timeouts:`, matchInfo.to);
-    
-    // Set up the match
-    setMatch(matchId, matchInfo);
-    setUserMatch(data.userId, matchId);
-    setUserMatch(compatiblePeer.id, matchId);
-    
-    // DEBUG: Verify match was saved
-    const savedMatch = getMatch(matchId);
-    console.log(`[MATCH_CREATE] Match saved successfully:`, !!savedMatch);
-    
-    // Remove both users from queue
-    const newQueue = queue.filter(p => p.id !== compatiblePeer.id);
-    setWaitingQueue(newQueue);
-    
-    console.log(`[FIND_MATCH] Created new match: ${data.userId} <-> ${compatiblePeer.id}`);
-    
-    return { 
-      status: 'matched',
+  if (!matchId || !type || !payload) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      required: ['matchId', 'type', 'payload']
+    });
+  }
+  
+  const match = activeMatches.get(matchId);
+  if (!match) {
+    console.log(`[SEND-SIGNAL] Match ${matchId} not found`);
+    return res.status(404).json({ 
+      error: 'Match not found',
       matchId,
-      partnerId: compatiblePeer.id,
-      isInitiator: deterministic_initiator(data.userId, compatiblePeer.id),
-      existing: false,
-      timestamp: now
-    };
-  }
-  
-  // No match found, add to queue
-  queue.push({ 
-    id: data.userId, 
-    tz: timezone,
-    ts: now
-  });
-  
-  setWaitingQueue(queue);
-  console.log(`[FIND_MATCH] Added ${data.userId} to queue, position: ${queue.length}`);
-  
-  return { 
-    status: 'waiting',
-    position: queue.length,
-    estimated_wait: Math.min(queue.length * 5, 60), // Rough estimate in seconds
-    timestamp: now
-  };
-}
-// Utility function to safely parse data that might be URL-encoded or direct JSON
-function safeParseData(data) {
-  if (!data) return null;
-  
-  // If already an object, return as-is
-  if (typeof data === 'object') {
-    return data;
-  }
-  
-  // If string, try to parse
-  if (typeof data === 'string') {
-    try {
-      // First try direct JSON parse
-      return JSON.parse(data);
-    } catch (directParseError) {
-      try {
-        // Then try with URL decode first
-        return JSON.parse(decodeURIComponent(data));
-      } catch (urlDecodeError) {
-        console.error('Failed to parse data:', data, directParseError.message, urlDecodeError.message);
-        return null;
-      }
-    }
-  }
-  
-  return null;
-}
-
-// Updated handleExchangeSignals function with safer parsing
-async function handleExchangeSignals(data, now) {
-  if (!data.matchId) {
-    console.log('[EXCHANGE] Missing matchId');
-    return { status: 'error', message: 'Missing matchId parameter' };
-  }
-  
-  console.log('[EXCHANGE] Processing signals for match:', data.matchId, 'user:', data.userId);
-  console.log('[EXCHANGE] Data keys:', Object.keys(data));
-  
-  const validation = await validateMatch(data.matchId, data.userId);
-  if (!validation.valid) {
-    console.log('[EXCHANGE] Validation failed:', validation.error);
-    return { status: 'error', message: validation.error };
-  }
-  
-  let match = validation.match;
-  match = await cleanExpiredSignals(match, now);
-  
-  const partnerId = match.peer1 === data.userId ? match.peer2 : match.peer1;
-  let signalsAdded = 0;
-  
-  // UPDATED: Enhanced signal parsing with safer method
-  if (data.offer) {
-    try {
-      const offer = safeParseData(data.offer);
-      
-      if (offer && now < match.timeouts.offer) {
-        match.signaling[partnerId].offers.push({
-          f: data.userId,
-          d: offer,
-          ts: now,
-          id: `o_${now}_${Math.random().toString(36).substr(2, 4)}`
-        });
-        signalsAdded++;
-        console.log(`[SIGNALS] Added offer from ${data.userId} to ${partnerId}`);
-      } else if (!offer) {
-        console.error('[SIGNALS] Failed to parse offer data');
-      } else {
-        console.log(`[SIGNALS] Offer timeout expired for ${data.userId}`);
-      }
-    } catch (e) {
-      console.error('[SIGNALS] Failed to process offer:', e.message, 'Data:', data.offer);
-    }
-  }
-  
-  if (data.answer) {
-    try {
-      const answer = safeParseData(data.answer);
-      
-      if (answer && now < match.timeouts.answer) {
-        match.signaling[partnerId].answers.push({
-          f: data.userId,
-          d: answer,
-          ts: now,
-          id: `a_${now}_${Math.random().toString(36).substr(2, 4)}`
-        });
-        signalsAdded++;
-        console.log(`[SIGNALS] Added answer from ${data.userId} to ${partnerId}`);
-      } else if (!answer) {
-        console.error('[SIGNALS] Failed to parse answer data');
-      } else {
-        console.log(`[SIGNALS] Answer timeout expired for ${data.userId}`);
-      }
-    } catch (e) {
-      console.error('[SIGNALS] Failed to process answer:', e.message, 'Data:', data.answer);
-    }
-  }
-  
-  if (data.ice) {
-    try {
-      const ice = safeParseData(data.ice);
-      
-      if (Array.isArray(ice) && now < match.timeouts.connection) {
-        const currentIce = match.signaling[partnerId].ice.length;
-        const availableSlots = Math.max(0, 15 - currentIce);
-        const candidatesToAdd = ice.slice(0, availableSlots);
-        
-        candidatesToAdd.forEach(candidate => {
-          match.signaling[partnerId].ice.push({
-            f: data.userId,
-            d: candidate,
-            ts: now,
-            id: `i_${now}_${Math.random().toString(36).substr(2, 4)}`
-          });
-          signalsAdded++;
-        });
-        
-        if (candidatesToAdd.length > 0) {
-          console.log(`[SIGNALS] Added ${candidatesToAdd.length} ICE candidates from ${data.userId}`);
-        }
-      } else if (!ice) {
-        console.error('[SIGNALS] Failed to parse ICE data');
-      } else {
-        console.log(`[SIGNALS] ICE timeout expired or invalid format for ${data.userId}`);
-      }
-    } catch (e) {
-      console.error('[SIGNALS] Failed to process ICE candidates:', e.message, 'Data:', data.ice);
-    }
-  }
-  
-  // Handle acknowledgments and special signals (no change needed)
-  if (data.connectionReady === 'true' || data.connectionReady === true) {
-    match.signaling[partnerId].acks.push({
-      t: 'ready',
-      f: data.userId,
-      ts: now,
-      id: `r_${now}_${Math.random().toString(36).substr(2, 4)}`
+      availableMatches: Array.from(activeMatches.keys())
     });
-    match.status = 'connected';
-    console.log(`[SIGNALS] Connection ready from ${data.userId}`);
-    signalsAdded++;
   }
   
-  if (data.ping === 'true' || data.ping === true) {
-    match.signaling[partnerId].acks.push({
-      t: 'ping',
-      f: data.userId,
-      ts: now,
-      id: `p_${now}_${Math.random().toString(36).substr(2, 4)}`
-    });
-    console.log(`[SIGNALS] Ping from ${data.userId}`);
-    signalsAdded++;
+  if (match.p1 !== userId && match.p2 !== userId) {
+    return res.status(403).json({ error: 'User not in this match' });
   }
   
-  // UPDATED: Process acknowledgments with safer parsing
-  if (data.acknowledgeIds) {
-    try {
-      const ackIds = safeParseData(data.acknowledgeIds);
-      
-      if (Array.isArray(ackIds) && ackIds.length > 0) {
-        const signals = match.signaling[data.userId];
-        let ackedCount = 0;
-        
-        signals.offers = signals.offers.filter(s => {
-          if (ackIds.includes(s.id)) {
-            ackedCount++;
-            return false;
-          }
-          return true;
-        });
-        
-        signals.answers = signals.answers.filter(s => {
-          if (ackIds.includes(s.id)) {
-            ackedCount++;
-            return false;
-          }
-          return true;
-        });
-        
-        signals.ice = signals.ice.filter(s => {
-          if (ackIds.includes(s.id)) {
-            ackedCount++;
-            return false;
-          }
-          return true;
-        });
-        
-        signals.acks = signals.acks.filter(s => {
-          if (ackIds.includes(s.id)) {
-            ackedCount++;
-            return false;
-          }
-          return true;
-        });
-        
-        if (ackedCount > 0) {
-          console.log(`[SIGNALS] Acknowledged ${ackedCount} signals for ${data.userId}`);
-        }
-      } else if (data.acknowledgeIds) {
-        console.error('[SIGNALS] Failed to parse acknowledgeIds or not an array');
-      }
-    } catch (e) {
-      console.error('[SIGNALS] Failed to process acknowledgeIds:', e.message);
-    }
+  const partnerId = match.p1 === userId ? match.p2 : match.p1;
+  
+  // Add signal to partner's queue
+  if (!match.signals[partnerId]) {
+    match.signals[partnerId] = [];
   }
   
-  // Save updated match
-  setMatch(data.matchId, compressMatch(match));
-  
-  // Prepare response with pending signals (no change needed)
-  const mySignals = match.signaling[data.userId];
-  const pendingSignals = {
-    offers: mySignals.offers.map(s => ({
-      from: s.f,
-      offer: s.d,
-      timestamp: s.ts,
-      id: s.id
-    })),
-    answers: mySignals.answers.map(s => ({
-      from: s.f,
-      answer: s.d,
-      timestamp: s.ts,
-      id: s.id
-    })),
-    ice: mySignals.ice.map(s => ({
-      from: s.f,
-      candidate: s.d,
-      timestamp: s.ts,
-      id: s.id
-    })),
-    acks: mySignals.acks.map(s => ({
-      type: s.t,
-      from: s.f,
-      timestamp: s.ts,
-      id: s.id
-    }))
-  };
-  
-  const allSignalIds = [
-    ...pendingSignals.offers.map(s => s.id),
-    ...pendingSignals.answers.map(s => s.id),
-    ...pendingSignals.ice.map(s => s.id),
-    ...pendingSignals.acks.map(s => s.id)
-  ];
-  
-  const totalPending = allSignalIds.length;
-  if (totalPending > 0) {
-    console.log(`[SIGNALS] Returning ${totalPending} pending signals to ${data.userId}`);
-  }
-  
-  return {
-    status: 'signals',
-    signals: pendingSignals,
-    signalIds: allSignalIds,
-    partnerId: partnerId,
-    matchStatus: match.status,
-    signalsAdded: signalsAdded,
-    timestamp: now
-  };
-}
- 
-async function handleHeartbeat(data, now) {
-  const existingMatchId = getUserMatch(data.userId);
-  if (existingMatchId) {
-    const match = getMatch(existingMatchId);
-    if (match) {
-      const expanded = expandMatch(match);
-      const partnerId = expanded.peer1 === data.userId ? expanded.peer2 : expanded.peer1;
-      
-      return {
-        status: 'alive',
-        matched: true,
-        matchId: existingMatchId,
-        partnerId: partnerId,
-        isInitiator: deterministic_initiator(data.userId, partnerId),
-        matchStatus: expanded.status,
-        timestamp: now
-      };
-    } else {
-      deleteUserMatch(data.userId);
-      console.log(`[HEARTBEAT] Cleaned stale match reference for ${data.userId}`);
-    }
-  }
-  
-  return { 
-    status: 'alive',
-    matched: false,
-    timestamp: now
-  };
-}
-
-async function handleDisconnect(data) {
-  console.log(`[DISCONNECT] Processing disconnect for ${data.userId}`);
-  
-  // Remove from waiting queue
-  const queue = getWaitingQueue();
-  const filteredQueue = queue.filter(p => p.id !== data.userId);
-  if (filteredQueue.length !== queue.length) {
-    setWaitingQueue(filteredQueue);
-    console.log(`[DISCONNECT] Removed ${data.userId} from waiting queue`);
-  }
-  
-  // Handle active match
-  const existingMatchId = getUserMatch(data.userId);
-  if (existingMatchId) {
-    const match = getMatch(existingMatchId);
-    if (match) {
-      const partnerId = match.p1 === data.userId ? match.p2 : match.p1;
-      deleteUserMatch(partnerId);
-      console.log(`[DISCONNECT] Cleaned partner mapping: ${partnerId}`);
-    }
-    deleteMatch(existingMatchId);
-    deleteUserMatch(data.userId);
-    console.log(`[DISCONNECT] Cleaned match and user mapping for ${data.userId}`);
-  }
-  
-  // Remove heartbeat
-  heartbeats.delete(data.userId);
-  
-  return { 
-    status: 'disconnected',
+  const signal = {
+    type,
+    payload,
+    from: userId,
     timestamp: Date.now()
   };
+  
+  match.signals[partnerId].push(signal);
+  
+  // Limit signal queue size to prevent memory bloat
+  if (match.signals[partnerId].length > 100) {
+    match.signals[partnerId] = match.signals[partnerId].slice(-50);
+    console.log(`[SEND-SIGNAL] Trimmed signal queue for ${partnerId}`);
+  }
+  
+  console.log(`[SEND-SIGNAL] ${userId} -> ${partnerId} (${type}) in match ${matchId}`);
+  
+  return res.json({
+    status: 'sent',
+    partnerId,
+    signalType: type,
+    queueLength: match.signals[partnerId].length,
+    timestamp: Date.now()
+  });
 }
+
+function handleDisconnect(userId, res) {
+  console.log(`[DISCONNECT] ${userId}`);
+  
+  let removed = false;
+  
+  // Remove from waiting list
+  if (waitingUsers.has(userId)) {
+    waitingUsers.delete(userId);
+    removed = true;
+    console.log(`[DISCONNECT] Removed ${userId} from waiting list`);
+  }
+  
+  // Remove from active matches and notify partner
+  for (const [matchId, match] of activeMatches.entries()) {
+    if (match.p1 === userId || match.p2 === userId) {
+      const partnerId = match.p1 === userId ? match.p2 : match.p1;
+      
+      // Add disconnect signal to partner's queue
+      if (match.signals[partnerId]) {
+        match.signals[partnerId].push({
+          type: 'disconnect',
+          payload: { reason: 'partner_disconnected' },
+          from: userId,
+          timestamp: Date.now()
+        });
+      }
+      
+      console.log(`[DISCONNECT] Removing match ${matchId}, notifying ${partnerId}`);
+      
+      // Remove match after a delay to let partner receive disconnect signal
+      setTimeout(() => {
+        activeMatches.delete(matchId);
+        console.log(`[DISCONNECT] Match ${matchId} cleaned up`);
+      }, 5000);
+      
+      removed = true;
+      break;
+    }
+  }
+  
+  return res.json({ 
+    status: 'disconnected',
+    removed,
+    timestamp: Date.now()
+  });
+}
+
+// ==========================================
+// CLEANUP UTILITIES
+// ==========================================
+
+function cleanup() {
+  const now = Date.now();
+  let cleanedUsers = 0;
+  let cleanedMatches = 0;
+  
+  // Clean expired waiting users
+  for (const [userId, user] of waitingUsers.entries()) {
+    if (now - user.timestamp > USER_TIMEOUT) {
+      waitingUsers.delete(userId);
+      cleanedUsers++;
+    }
+  }
+  
+  // Clean old matches
+  for (const [matchId, match] of activeMatches.entries()) {
+    if (now - match.timestamp > MATCH_LIFETIME) {
+      activeMatches.delete(matchId);
+      cleanedMatches++;
+    }
+  }
+  
+  // Prevent memory bloat - remove oldest users if too many waiting
+  if (waitingUsers.size > MAX_WAITING_USERS) {
+    const excess = waitingUsers.size - MAX_WAITING_USERS;
+    const oldestUsers = Array.from(waitingUsers.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp)
+      .slice(0, excess);
+    
+    oldestUsers.forEach(([userId]) => {
+      waitingUsers.delete(userId);
+      cleanedUsers++;
+    });
+    
+    console.log(`[CLEANUP] Removed ${excess} oldest users due to capacity limit`);
+  }
+  
+  if (cleanedUsers > 0 || cleanedMatches > 0) {
+    console.log(`[CLEANUP] Removed ${cleanedUsers} expired users, ${cleanedMatches} old matches. Active: ${waitingUsers.size} waiting, ${activeMatches.size} matched`);
+  }
+}
+
+// Auto-cleanup every 5 minutes
+setInterval(cleanup, 300000);
