@@ -6,7 +6,7 @@ let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
 const USER_TIMEOUT = 120000; // 2 minutes for waiting users
 const MATCH_LIFETIME = 600000; // 10 minutes for active matches
-const MAX_WAITING_USERS = 1000; // Prevent memory bloat
+const MAX_WAITING_USERS = 120000; // Prevent memory bloat
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
