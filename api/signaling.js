@@ -1052,47 +1052,58 @@ export default async function handler(req) {
     }
     
     try {
-        // IMPROVED JSON PARSING cho Edge Runtime
+        // FLEXIBLE JSON PARSING - handle both string and object body như code cũ
         let data;
         let requestBody = '';
         
         try {
-            // Check if request has body
-            if (!req.body) {
-                return createCorsResponse({ 
-                    error: 'No request body found',
-                    method: req.method,
-                    headers: Object.fromEntries(req.headers.entries()),
-                    tip: 'Make sure to send JSON body with your request'
-                }, 400);
+            // Method 1: Try req.json() first (works in some environments)
+            try {
+                data = await req.json();
+                criticalLog('PARSE-SUCCESS', 'Used req.json() method');
+            } catch (jsonError) {
+                // Method 2: Manual stream reading (for problematic Edge Runtime)
+                if (!req.body) {
+                    return createCorsResponse({ 
+                        error: 'No request body found',
+                        method: req.method,
+                        tip: 'Make sure to send JSON body with your POST request'
+                    }, 400);
+                }
+                
+                // Read body stream
+                const reader = req.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    requestBody += decoder.decode(value, { stream: true });
+                }
+                
+                if (!requestBody.trim()) {
+                    return createCorsResponse({ 
+                        error: 'Empty request body',
+                        tip: 'Send JSON data like: {"action":"instant-match","userId":"123"}'
+                    }, 400);
+                }
+                
+                // Parse the body - handle both string and object như code cũ
+                if (typeof requestBody === 'string') {
+                    data = JSON.parse(requestBody);
+                } else {
+                    data = requestBody;
+                }
+                
+                criticalLog('PARSE-SUCCESS', 'Used manual stream reading method');
             }
-            
-            // Read body stream properly for Edge Runtime
-            const reader = req.body.getReader();
-            const decoder = new TextDecoder();
-            
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                requestBody += decoder.decode(value, { stream: true });
-            }
-            
-            // Parse the accumulated body
-            if (!requestBody.trim()) {
-                return createCorsResponse({ 
-                    error: 'Empty request body',
-                    tip: 'Send JSON data like: {"action":"instant-match","userId":"123"}'
-                }, 400);
-            }
-            
-            data = JSON.parse(requestBody);
             
         } catch (parseError) {
             return createCorsResponse({ 
                 error: 'Invalid JSON in request body',
                 details: parseError.message,
-                receivedBody: requestBody.substring(0, 200), // Show first 200 chars
-                tip: 'Check your JSON syntax'
+                receivedBody: requestBody.substring(0, 200),
+                tip: 'Check your JSON syntax - should be valid JSON object'
             }, 400);
         }
         
@@ -1116,7 +1127,7 @@ export default async function handler(req) {
         }
         
         // Enhanced logging
-        criticalLog(`${action.toUpperCase()}`, `${userId.slice(-8)} (Zone: ${chatZone || 'N/A'}) | Body: ${requestBody.substring(0, 100)}...`);
+        criticalLog(`${action.toUpperCase()}`, `${userId.slice(-8)} (Zone: ${chatZone || 'N/A'})`);
         
         switch (action) {
             case 'instant-match': 
