@@ -1,6 +1,3 @@
-// WebRTC Signaling Server - Standard Offer/Answer Exchange
-// Synchronized with fixed client that generates fresh signals
-
 let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo }
 let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
@@ -8,22 +5,32 @@ const USER_TIMEOUT = 120000; // 2 minutes for waiting users
 const MATCH_LIFETIME = 600000; // 10 minutes for active matches
 const MAX_WAITING_USERS = 120000; // Prevent memory bloat
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
+// Helper function for CORS responses
+function createCorsResponse(data, status = 200) {
+  return new Response(data ? JSON.stringify(data) : null, {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    }
+  });
+}
+
+export default async function handler(req) {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    return createCorsResponse(null, 200);
   }
   
   // GET: Health check and debug info
   if (req.method === 'GET') {
-    const { debug } = req.query;
+    const url = new URL(req.url);
+    const debug = url.searchParams.get('debug');
     
     if (debug === 'true') {
-      return res.json({
+      return createCorsResponse({
         status: 'webrtc-signaling-server',
         stats: {
           waitingUsers: waitingUsers.size,
@@ -39,7 +46,7 @@ export default async function handler(req, res) {
     // Trigger cleanup
     cleanup();
     
-    return res.json({ 
+    return createCorsResponse({ 
       status: 'signaling-ready',
       stats: { 
         waiting: waitingUsers.size, 
@@ -51,41 +58,36 @@ export default async function handler(req, res) {
   }
   
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'POST required for signaling' });
+    return createCorsResponse({ error: 'POST required for signaling' }, 405);
   }
   
   try {
     // Parse request body
-    let data;
-    if (typeof req.body === 'string') {
-      data = JSON.parse(req.body);
-    } else {
-      data = req.body;
-    }
+    const data = await req.json();
     
     const { action, userId } = data;
     
     if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
+      return createCorsResponse({ error: 'userId is required' }, 400);
     }
     
     console.log(`[${action?.toUpperCase() || 'UNKNOWN'}] ${userId}`);
     
     switch (action) {
       case 'instant-match': 
-        return handleInstantMatch(userId, data, res);
+        return handleInstantMatch(userId, data);
       case 'get-signals': 
-        return handleGetSignals(userId, res);
+        return handleGetSignals(userId);
       case 'send-signal': 
-        return handleSendSignal(userId, data, res);
+        return handleSendSignal(userId, data);
       case 'disconnect': 
-        return handleDisconnect(userId, res);
+        return handleDisconnect(userId);
       default: 
-        return res.status(400).json({ error: `Unknown action: ${action}` });
+        return createCorsResponse({ error: `Unknown action: ${action}` }, 400);
     }
   } catch (error) {
     console.error('[SERVER ERROR]', error);
-    return res.status(500).json({ error: 'Server error', details: error.message });
+    return createCorsResponse({ error: 'Server error', details: error.message }, 500);
   }
 }
 
@@ -93,7 +95,7 @@ export default async function handler(req, res) {
 // INSTANT MATCH HANDLER (SIMPLIFIED)
 // ==========================================
 
-function handleInstantMatch(userId, data, res) {
+function handleInstantMatch(userId, data) {
   const { userInfo, preferredMatchId } = data;
   
   console.log(`[INSTANT-MATCH] ${userId} looking for partner`);
@@ -151,7 +153,7 @@ function handleInstantMatch(userId, data, res) {
   }
   
   if (bestMatch) {
-    // INSTANT MATCH FOUND! ðŸš€
+    // INSTANT MATCH FOUND! 🚀
     const partnerId = bestMatch.userId;
     const partnerUser = bestMatch.user;
     
@@ -183,9 +185,9 @@ function handleInstantMatch(userId, data, res) {
     
     activeMatches.set(matchId, match);
     
-    console.log(`[INSTANT-MATCH] ðŸš€ ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'}`);
+    console.log(`[INSTANT-MATCH] 🚀 ${userId} <-> ${partnerId} (${matchId}) - ${isUserInitiator ? 'INITIATOR' : 'RECEIVER'}`);
     
-    return res.json({
+    return createCorsResponse({
       status: 'instant-match',
       matchId,
       partnerId,
@@ -210,7 +212,7 @@ function handleInstantMatch(userId, data, res) {
     const position = waitingUsers.size;
     console.log(`[INSTANT-MATCH] ${userId} added to waiting list (position ${position})`);
     
-    return res.json({
+    return createCorsResponse({
       status: 'waiting',
       position,
       waitingUsers: waitingUsers.size,
@@ -225,7 +227,7 @@ function handleInstantMatch(userId, data, res) {
 // SIGNAL HANDLERS
 // ==========================================
 
-function handleGetSignals(userId, res) {
+function handleGetSignals(userId) {
   // Find user's match
   for (const [matchId, match] of activeMatches.entries()) {
     if (match.p1 === userId || match.p2 === userId) {
@@ -237,7 +239,7 @@ function handleGetSignals(userId, res) {
       
       console.log(`[GET-SIGNALS] ${userId} -> ${signals.length} signals from match ${matchId}`);
       
-      return res.json({
+      return createCorsResponse({
         status: 'matched',
         matchId,
         partnerId,
@@ -251,7 +253,7 @@ function handleGetSignals(userId, res) {
   // Check if still in waiting list
   if (waitingUsers.has(userId)) {
     const position = Array.from(waitingUsers.keys()).indexOf(userId) + 1;
-    return res.json({
+    return createCorsResponse({
       status: 'waiting',
       position,
       waitingUsers: waitingUsers.size,
@@ -259,35 +261,35 @@ function handleGetSignals(userId, res) {
     });
   }
   
-  return res.json({
+  return createCorsResponse({
     status: 'not_found',
     message: 'User not found in waiting list or active matches',
     timestamp: Date.now()
   });
 }
 
-function handleSendSignal(userId, data, res) {
+function handleSendSignal(userId, data) {
   const { matchId, type, payload } = data;
   
   if (!matchId || !type || !payload) {
-    return res.status(400).json({ 
+    return createCorsResponse({ 
       error: 'Missing required fields',
       required: ['matchId', 'type', 'payload']
-    });
+    }, 400);
   }
   
   const match = activeMatches.get(matchId);
   if (!match) {
     console.log(`[SEND-SIGNAL] Match ${matchId} not found`);
-    return res.status(404).json({ 
+    return createCorsResponse({ 
       error: 'Match not found',
       matchId,
       availableMatches: Array.from(activeMatches.keys())
-    });
+    }, 404);
   }
   
   if (match.p1 !== userId && match.p2 !== userId) {
-    return res.status(403).json({ error: 'User not in this match' });
+    return createCorsResponse({ error: 'User not in this match' }, 403);
   }
   
   const partnerId = match.p1 === userId ? match.p2 : match.p1;
@@ -314,7 +316,7 @@ function handleSendSignal(userId, data, res) {
   
   console.log(`[SEND-SIGNAL] ${userId} -> ${partnerId} (${type}) in match ${matchId}`);
   
-  return res.json({
+  return createCorsResponse({
     status: 'sent',
     partnerId,
     signalType: type,
@@ -323,7 +325,7 @@ function handleSendSignal(userId, data, res) {
   });
 }
 
-function handleDisconnect(userId, res) {
+function handleDisconnect(userId) {
   console.log(`[DISCONNECT] ${userId}`);
   
   let removed = false;
@@ -363,7 +365,7 @@ function handleDisconnect(userId, res) {
     }
   }
   
-  return res.json({ 
+  return createCorsResponse({ 
     status: 'disconnected',
     removed,
     timestamp: Date.now()
@@ -417,3 +419,8 @@ function cleanup() {
 
 // Auto-cleanup every 5 minutes
 setInterval(cleanup, 300000);
+
+// Edge Runtime configuration
+export const config = {
+  runtime: 'edge'
+};
