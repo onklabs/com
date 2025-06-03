@@ -77,44 +77,6 @@ function createCorsResponse(data, status = 200) {
 }
 
 // ==========================================
-// PERFORMANCE MONITORING
-// ==========================================
-
-function trackRequest() {
-    requestCount++;
-    
-    const now = Date.now();
-    if (now - lastResetTime > 3600000) { // Reset every hour
-        requestCount = 0;
-        lastResetTime = now;
-    }
-    
-    return {
-        count: requestCount,
-        period: Math.round((now - lastResetTime) / 1000),
-        rps: requestCount / Math.max(1, (now - lastResetTime) / 1000)
-    };
-}
-
-// ==========================================
-// VALIDATION UTILITIES
-// ==========================================
-
-function validateUserData(data) {
-    const { userId } = data;
-    
-    // Only validate userId - same as signaling (5).js
-    if (!userId) {
-        return { valid: false, error: 'userId is required' };
-    }
-    
-    // Remove all other validations to match signaling (5).js behavior
-    // No validation for chatZone, userInfo, etc.
-    
-    return { valid: true };
-}
-
-// ==========================================
 // SORTED LIST MAINTENANCE
 // ==========================================
 
@@ -842,84 +804,6 @@ function cleanup() {
 }
 
 // ==========================================
-// STATISTICS & UTILITIES
-// ==========================================
-
-function getServerStats() {
-    const now = Date.now();
-    
-    const timezoneStats = {};
-    for (const user of waitingUsers.values()) {
-        const zone = user.chatZone || 'unknown';
-        timezoneStats[zone] = (timezoneStats[zone] || 0) + 1;
-    }
-    
-    let totalWaitTime = 0;
-    let userCount = 0;
-    for (const user of waitingUsers.values()) {
-        totalWaitTime += (now - user.timestamp);
-        userCount++;
-    }
-    const avgWaitTime = userCount > 0 ? Math.round(totalWaitTime / userCount / 1000) : 0;
-    
-    const totalUsers = waitingUsers.size + (activeMatches.size * 2);
-    const matchRate = totalUsers > 0 ? Math.round((activeMatches.size * 2) / totalUsers * 100) : 0;
-    
-    return {
-        waiting: waitingUsers.size,
-        matched: activeMatches.size * 2,
-        total: totalUsers,
-        avgWaitTime: avgWaitTime,
-        matchRate: matchRate,
-        timezoneDistribution: timezoneStats,
-        lastSwapTime: lastSwapTime,
-        timeSinceLastSwap: now - lastSwapTime,
-        sortedListSize: sortedUsersByTimezone.length
-    };
-}
-
-function getUserPosition(userId) {
-    const userIds = Array.from(waitingUsers.keys());
-    const position = userIds.indexOf(userId);
-    return position >= 0 ? position + 1 : null;
-}
-
-function estimateWaitTime(chatZone) {
-    const sameZoneUsers = Array.from(waitingUsers.values())
-        .filter(user => user.chatZone === chatZone).length;
-    
-    if (sameZoneUsers >= 2) {
-        return 5; // Quick match expected
-    } else if (sameZoneUsers === 1) {
-        return 15; // Need one more user in same zone
-    } else {
-        const totalUsers = waitingUsers.size;
-        return Math.min(totalUsers * 3, 60); // Max 1 minute estimate
-    }
-}
-
-function gracefulShutdown() {
-    criticalLog('SHUTDOWN', 'Server shutting down gracefully...');
-    
-    for (const [matchId, match] of activeMatches.entries()) {
-        if (match.signals) {
-            [match.p1, match.p2].forEach(userId => {
-                if (match.signals[userId]) {
-                    match.signals[userId].push({
-                        type: 'server-shutdown',
-                        payload: { reason: 'Server maintenance' },
-                        from: 'server',
-                        timestamp: Date.now()
-                    });
-                }
-            });
-        }
-    }
-    
-    criticalLog('SHUTDOWN', `Notified ${activeMatches.size} active matches about shutdown`);
-}
-
-// ==========================================
 // MAIN HANDLER FUNCTION
 // ==========================================
 
@@ -1150,13 +1034,3 @@ export default async function handler(req) {
 
 // Edge Runtime configuration
 export const config = { runtime: 'edge' };
-
-// Export additional utilities for testing (if needed)
-export {
-    getServerStats,
-    validateUserData,
-    getUserPosition,
-    estimateWaitTime,
-    gracefulShutdown,
-    trackRequest
-};
