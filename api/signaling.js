@@ -470,7 +470,7 @@ function handleInstantMatch(userId, data) {
         
         activeMatches.set(matchId, match);
         
-        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatch.score} | Strategy: ${strategy} | Time: ${matchTime}ms`);
+        criticalLog('INSTANT-MATCH', `🚀 ${userId.slice(-8)} <-> ${partnerId.slice(-8)} (${matchId}) | Score: ${bestMatch.score}`);
         
         return createCorsResponse({
             status: 'instant-match',
