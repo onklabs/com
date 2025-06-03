@@ -26,6 +26,12 @@ const TIMEZONE_CIRCLE_HOURS = 24; // 24-hour timezone circle (fixed)
 let waitingUsers = new Map(); // userId -> { userId, timestamp, userInfo, chatZone }
 let activeMatches = new Map(); // matchId -> { p1, p2, signals, timestamp }
 
+// Smart logging function
+function smartLog(level, ...args) {
+    if (ENABLE_DETAILED_LOGGING) {
+        console.log(`[${level}]`, ...args);
+    }
+}
 
 // Critical logs always show (errors, matches, etc.)
 function criticalLog(level, ...args) {
