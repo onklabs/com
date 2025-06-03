@@ -2,7 +2,7 @@ const ENABLE_DETAILED_LOGGING = false;
 
 const USER_TIMEOUT = 120000;
 const MATCH_LIFETIME = 600000;
-const MAX_WAITING_USERS = 50000;
+const MAX_WAITING_USERS = 120000;
 const TIMEZONE_MAX_SCORE = 20;
 const TIMEZONE_PENALTY = 1;
 
@@ -278,6 +278,7 @@ function handleInstantMatch(userId, data) {
 function handleGetSignals(userId, data) {
     const { chatZone, gender } = data;
     
+    // Check if user got matched while waiting
     for (const [matchId, match] of activeMatches.entries()) {
         if (match.p1 === userId || match.p2 === userId) {
             const partnerId = match.p1 === userId ? match.p2 : match.p1;
@@ -285,7 +286,13 @@ function handleGetSignals(userId, data) {
             
             match.signals[userId] = [];
             
-            smartLog('GET-SIGNALS', `${userId.slice(-8)} -> ${signals.length} signals`);
+            smartLog('GET-SIGNALS', `${userId.slice(-8)} -> ${signals.length} signals from match ${matchId}`);
+            
+            // Remove from waiting list if still there
+            if (waitingUsers.has(userId)) {
+                const user = waitingUsers.get(userId);
+                removeUserFromIndexes(userId, user.chatZone);
+            }
             
             return createCorsResponse({
                 status: 'matched',
@@ -293,8 +300,10 @@ function handleGetSignals(userId, data) {
                 partnerId,
                 isInitiator: match.p1 === userId,
                 signals,
+                partnerInfo: match.userInfo ? match.userInfo[partnerId] : {},
                 partnerChatZone: match.chatZones ? match.chatZones[partnerId] : null,
                 matchScore: match.matchScore || null,
+                message: 'Match found! Start WebRTC connection.',
                 timestamp: Date.now()
             });
         }
