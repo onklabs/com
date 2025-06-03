@@ -50,7 +50,7 @@ function createCorsResponse(data, status = 200) {
         }
     });
 }
-function handleP2pConnected(userId, data) {Add commentMore actions
+function handleP2pConnected(userId, data) {
     const { matchId, partnerId } = data;
     console.log(`[P2PConnected] ${matchId}`);
     
