@@ -50,7 +50,33 @@ function createCorsResponse(data, status = 200) {
         }
     });
 }
-
+function handleP2pConnected(userId, data) {Add commentMore actions
+    const { matchId, partnerId } = data;
+    console.log(`[P2PConnected] ${matchId}`);
+    
+    let removed = false;
+    
+    // Remove from waiting list
+    if (waitingUsers.has(userId)) {
+        const user = waitingUsers.get(userId);
+        waitingUsers.delete(userId);
+        removed = true;
+        console.log(`[DISCONNECT] Removed ${userId} from waiting list`);
+    }
+    if (waitingUsers.has(partnerId)) {
+        const user = waitingUsers.get(partnerId);
+        waitingUsers.delete(partnerId);
+        removed = true;
+        console.log(`[DISCONNECT] Removed ${partnerId} from waiting list`);
+    }
+    activeMatches.delete(matchId);      
+    
+    return createCorsResponse({ 
+        status: 'p2p_connected',
+        removed,
+        timestamp: Date.now()
+    });
+}
 export default async function handler(req) {
     // Trigger cleanup on every request (since setInterval doesn't work in Edge Runtime)
     cleanup();
